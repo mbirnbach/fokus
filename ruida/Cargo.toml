@@ -1,0 +1,29 @@
+[package]
+name = "ruida"
+version = "0.1.0"
+edition = "2021"
+description = "Ruida laser controller protocol (RDC644x): .rd job decoding, toolpath preview, read-only status"
+license = "MIT OR Apache-2.0"
+
+# The protocol layer has no dependencies on purpose so it stays small and
+# auditable. Only the USB serial transport pulls in a crate.
+[features]
+default = ["serial"]
+serial = ["dep:serialport"]
+
+[dependencies]
+serialport = { version = "4.10", optional = true }
+
+[[bin]]
+name = "rd-dump"
+path = "src/bin/rd-dump.rs"
+
+[[bin]]
+name = "rd-status"
+path = "src/bin/rd-status.rs"
+required-features = ["serial"]
+
+[[bin]]
+name = "rd-send"
+path = "src/bin/rd-send.rs"
+required-features = ["serial"]

@@ -1,0 +1,9 @@
+[workspace]
+members = ["ruida", "fokus"]
+resolver = "3"
+
+# Release builds: smaller and faster binaries for the downloads.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

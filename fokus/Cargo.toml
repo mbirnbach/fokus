@@ -1,0 +1,16 @@
+[package]
+name = "fokus"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dirs = "7.0.0"
+eframe = "0.37"
+fluent-bundle = "0.16"
+rfd = "0.17"
+ruida = { version = "0.1.0", path = "../ruida" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+sys-locale = "0.3"
+unic-langid = "0.9"
+usvg = "0.49.0"
