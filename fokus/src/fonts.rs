@@ -24,6 +24,9 @@ pub fn database() -> Arc<usvg::fontdb::Database> {
         db.load_system_fonts();
         db.load_font_data(crate::theme::INTER_REGULAR.to_vec());
         db.load_font_data(crate::theme::INTER_SEMIBOLD.to_vec());
+        // `sans-serif` would mean Arial, which Linux usually lacks; text in an
+        // SVG whose fonts are all missing would then vanish. Inter is built in.
+        db.set_sans_serif_family(DEFAULT_FAMILY);
         Arc::new(db)
     })
     .clone()
@@ -32,6 +35,8 @@ pub fn database() -> Arc<usvg::fontdb::Database> {
 pub fn svg_options() -> usvg::Options<'static> {
     let mut opt = usvg::Options::default();
     opt.fontdb = database();
+    // For text that names no font at all.
+    opt.font_family = DEFAULT_FAMILY.to_string();
     opt
 }
 
