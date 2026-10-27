@@ -1,8 +1,9 @@
 name: CI
 
+# Tests on all three systems, started by hand (Actions → CI → Run workflow).
+# Releases run the same tests in release.yml before they build.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read

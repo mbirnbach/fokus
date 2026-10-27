@@ -237,8 +237,9 @@ cargo run -p ruida --bin rd-status -- --watch                                   
 
 Linux needs `libudev-dev libgtk-3-dev libxkbcommon-dev pkg-config` to build.
 
-*Actions → Release builds → Run workflow* builds the downloads for all platforms as workflow
-artifacts; publishing a GitHub release (with a tag like `v0.1.0`) runs the same workflow and
+Nothing runs on a push. *Actions → CI → Run workflow* runs the tests on Windows, macOS and
+Linux; *Actions → Release builds → Run workflow* builds the downloads for all platforms as
+workflow artifacts; publishing a GitHub release (with a tag like `v0.1.0`) runs the same workflow and
 attaches them to the release. [`scripts/package.sh`](scripts/package.sh) packages one platform
 locally (the DMG needs `dmgbuild`, which it installs on first use). The brand art is generated;
 see [`assets/brand/README.md`](assets/brand/README.md) to change or rebuild it. More about the
