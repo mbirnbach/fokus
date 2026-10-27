@@ -13,6 +13,7 @@ ruida = { version = "0.1.0", path = "../ruida" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 sys-locale = "0.3"
+ttf-parser = "0.25"
 unic-langid = "0.9"
 usvg = "0.49.0"
 

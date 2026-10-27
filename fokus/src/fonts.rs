@@ -40,12 +40,30 @@ pub fn svg_options() -> usvg::Options<'static> {
     opt
 }
 
-/// Installed font families, sorted by name (hidden system fonts left out).
+/// Whether a face has vector outlines. Bitmap-only fonts have none, so
+/// they could neither be previewed nor engraved.
+fn has_outlines(db: &usvg::fontdb::Database, id: usvg::fontdb::ID) -> bool {
+    use ttf_parser::Tag;
+    db.with_face_data(id, |data, index| {
+        ttf_parser::RawFace::parse(data, index)
+            .map(|face| [b"glyf", b"CFF ", b"CFF2"].iter().any(|t| face.table(Tag::from_bytes(t)).is_some()))
+            .unwrap_or(false)
+    })
+    .unwrap_or(false)
+}
+
+/// Installed font families with outlines, sorted by name (hidden system
+/// fonts left out).
 pub fn families() -> &'static [String] {
     static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
     FAMILIES.get_or_init(|| {
         let db = database();
-        let mut names: Vec<String> = db.faces().filter_map(|f| f.families.first().map(|(n, _)| n.clone())).filter(|n| !n.starts_with('.')).collect();
+        let mut names: Vec<String> = db
+            .faces()
+            .filter(|f| has_outlines(&db, f.id))
+            .filter_map(|f| f.families.first().map(|(n, _)| n.clone()))
+            .filter(|n| !n.starts_with('.'))
+            .collect();
         names.sort_by_key(|n| n.to_lowercase());
         names.dedup();
         names
@@ -261,5 +279,13 @@ mod tests {
         let f = legacy_family("Sans");
         assert!(families().contains(&f));
         assert_eq!(legacy_family("Inter"), "Inter");
+    }
+
+    #[test]
+    fn every_listed_family_has_outlines() {
+        let db = database();
+        for name in families() {
+            assert!(db.faces().any(|f| f.families.iter().any(|(n, _)| n == name) && has_outlines(&db, f.id)), "{name}");
+        }
     }
 }
