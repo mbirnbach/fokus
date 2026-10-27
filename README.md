@@ -70,6 +70,17 @@ experience. It replaces LightBurn and LotusCut for everyday jobs.
 
 <table>
   <tr>
+    <td width="50%"><img src="docs/images/text.png" alt="Text being edited on the canvas: the word Makerspace, with the font list open and Futura picked"></td>
+    <td width="50%"><img src="docs/images/points.png" alt="A heart shape in the point editor, with its points shown and the curve handles of one point"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Text in any font on your computer, typed straight onto the canvas.</sub></td>
+    <td align="center"><sub>Every shape can be edited point by point.</sub></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
     <td width="58%"><img src="docs/images/materials.png" alt="The Materials window: a list of materials on the left, and for Pappelsperrholz 4 mm the cut and engrave settings with speed, power, passes and air assist"></td>
     <td width="42%"><img src="docs/images/checklist.png" alt="The Before you start checklist: material in place, focus set, laser head at the start point, lid closed with exhaust and air on"></td>
   </tr>
