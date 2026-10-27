@@ -927,10 +927,9 @@ impl FokusApp {
         let pal = theme::p();
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            widgets::logo(ui, 28.0);
-            ui.add_space(4.0);
-            ui.label(RichText::new("Fokus").size(16.0).semibold());
-            ui.add_space(14.0);
+            ui.add_space(2.0);
+            widgets::wordmark(ui, 19.0);
+            ui.add_space(16.0);
             let ctx = ui.ctx().clone();
             if widgets::icon_button(ui, Icon::FilePlus, format!("{}  {}", t!("menu-new"), shortcut(&ctx, Modifiers::COMMAND, Key::N))).clicked() {
                 self.request(Pending::New);

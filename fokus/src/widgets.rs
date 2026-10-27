@@ -230,17 +230,28 @@ pub fn chip(ui: &mut Ui, text: &str, on: bool) {
     ui.painter().galley(egui::pos2(rect.min.x + 9.0 + icon, rect.center().y - galley.size().y / 2.0), galley, color);
 }
 
-/// The app icon (assets/brand), as in the Dock or taskbar.
-pub fn logo(ui: &mut Ui, size: f32) {
-    static TEXTURE: std::sync::OnceLock<egui::TextureHandle> = std::sync::OnceLock::new();
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    let tex = TEXTURE.get_or_init(|| {
-        let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/brand/icon/fokus-256.png")).expect("icon is a PNG");
-        let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
-        ui.ctx().load_texture("fokus-logo", image, egui::TextureOptions::LINEAR)
+/// The Fokus wordmark (assets/brand), `height` tall from the top of the
+/// letters to the bottom of the "o"; light or dark ink to suit the theme.
+pub fn wordmark(ui: &mut Ui, height: f32) {
+    static TEXTURES: std::sync::OnceLock<[egui::TextureHandle; 2]> = std::sync::OnceLock::new();
+    let textures = TEXTURES.get_or_init(|| {
+        let load = |name: &str, png: &[u8]| {
+            let img = eframe::icon_data::from_png_bytes(png).expect("wordmark is a PNG");
+            let image = egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.rgba);
+            ui.ctx().load_texture(name, image, egui::TextureOptions::LINEAR)
+        };
+        [
+            load("wordmark-light", include_bytes!("../../assets/brand/wordmark/fokus-wordmark-light.png")),
+            load("wordmark-dark", include_bytes!("../../assets/brand/wordmark/fokus-wordmark-dark.png")),
+        ]
     });
-    // The PNG has the usual transparent margin around the rounded square.
-    ui.painter().image(tex.id(), rect.expand(size * 0.12), egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+    let tex = &textures[theme::p().dark as usize];
+    // The letters inside the 692 × 260 artboard, which leaves clear space around them
+    // (see assets/brand/wordmark.py).
+    let uv = Rect::from_min_max(egui::pos2(24.0 / 692.0, 41.4 / 260.0), egui::pos2(667.5 / 692.0, 218.7 / 260.0));
+    let size = Vec2::new(height * (643.5 / 177.3), height);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
 }
 
 /// A small upper-case section heading.
