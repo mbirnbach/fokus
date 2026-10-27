@@ -1761,7 +1761,13 @@ impl FokusApp {
                 (title, pal.ok, 1.0, t!("took", time = clock(elapsed)))
             }
             JobPhase::Stopped => (if job.kind == JobKind::Frame { t!("frame-stopped") } else { t!("job-stopped") }, pal.warn, 0.0, t!("after", time = clock(elapsed))),
-            JobPhase::Failed(e) => (t!("job-failed"), pal.err, 0.0, e.clone()),
+            JobPhase::Failed(_) => (t!("job-failed"), pal.err, 0.0, t!("after", time = clock(elapsed))),
+        };
+        // Longer text goes on its own line under the title.
+        let message = match &job.phase {
+            JobPhase::Failed(e) => Some(e.clone()),
+            phase if phase.active() && snap.conn != Conn::Connected => Some(t!("job-reconnecting")),
+            _ => job.note.clone(),
         };
         Frame::new().fill(color.gamma_multiply(0.08)).stroke(Stroke::new(1.0, color.gamma_multiply(0.4))).corner_radius(12).inner_margin(Margin::same(12)).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -1774,6 +1780,10 @@ impl FokusApp {
                     ui.label(RichText::new(detail).color(pal.muted).size(12.0));
                 });
             });
+            if let Some(message) = message {
+                ui.label(RichText::new(message).color(pal.text).size(12.0));
+                ui.add_space(2.0);
+            }
             // A slim progress bar.
             let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
             ui.painter().rect_filled(r, 3.0, color.gamma_multiply(0.15));

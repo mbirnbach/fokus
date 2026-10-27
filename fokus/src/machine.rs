@@ -25,6 +25,10 @@ const MAX_FAILURES: u32 = 3;
 const IDLE_TO_FINISH: u32 = 4;
 /// How long to wait for the machine to get busy after sending.
 const START_TIMEOUT: Duration = Duration::from_secs(6);
+/// After the port vanishes (USB adapters near a laser drop out now and
+/// then), how long to keep trying to open it again, and how often.
+const RECONNECT_FOR: Duration = Duration::from_secs(60);
+const RECONNECT_EVERY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Conn {
@@ -73,11 +77,14 @@ pub struct JobProgress {
     /// Time spent paused so far, and since when it is paused now.
     pub paused_total: Duration,
     pub paused_since: Option<Instant>,
+    /// Something the user should know about this run (e.g. the connection
+    /// dropped while it ran, so the end is a guess).
+    pub note: Option<String>,
 }
 
 impl JobProgress {
     fn new(total: usize, estimate_s: f64, kind: JobKind) -> Self {
-        JobProgress { phase: JobPhase::Sending, sent: 0, total, started: Instant::now(), ended: None, estimate_s, kind, paused_total: Duration::ZERO, paused_since: None }
+        JobProgress { phase: JobPhase::Sending, sent: 0, total, started: Instant::now(), ended: None, estimate_s, kind, paused_total: Duration::ZERO, paused_since: None, note: None }
     }
 
     /// Time the job has been working (pauses don't count).
@@ -141,16 +148,16 @@ impl Machine {
         let shared = self.shared.clone();
         thread::spawn(move || {
             let repaint = || ctx.request_repaint();
-            let result = SerialTransport::open(&port, true)
-                .map_err(|e| t!("err-cannot-open-port", port = port.clone(), error = e.to_string()))
-                .and_then(|t| serve(StatusLink::new(t, MAGIC_644X), &shared, &stop, &rx, &repaint));
+            let open = || SerialTransport::open(&port, true).map_err(|e| t!("err-cannot-open-port", port = port.clone(), error = e.to_string()));
+            let result = run(open, &shared, &stop, &rx, &repaint);
             let mut s = shared.lock().unwrap();
             s.conn = match result {
                 Ok(()) => Conn::Disconnected,
                 Err(e) => Conn::Failed(e),
             };
             if let Some(job) = s.job.as_mut().filter(|j| j.phase.active()) {
-                job.phase = JobPhase::Failed(t!("err-connection-lost"));
+                // The controller has the whole job and carries on without us.
+                job.phase = JobPhase::Failed(t!("err-connection-lost-job"));
                 job.ended = Some(Instant::now());
             }
             repaint();
@@ -237,21 +244,61 @@ fn end_job(shared: &Mutex<Snapshot>, phase: JobPhase) {
 struct Watch {
     seen_busy: bool,
     idle_polls: u32,
+    /// The connection dropped while the job ran, so we may have missed
+    /// its start or end.
+    lost: bool,
 }
 
-/// The worker loop: poll status, run commands. Generic over the transport
-/// so it can be tested against a simulated controller.
-pub(crate) fn serve<T: Transport>(mut link: StatusLink<T>, shared: &Mutex<Snapshot>, stop: &AtomicBool, rx: &Receiver<Cmd>, repaint: &dyn Fn()) -> Result<(), String> {
+/// Open the port and serve it; if it is lost, keep reopening it for
+/// [`RECONNECT_FOR`] and carry on following a running job. Generic over
+/// the transport so it can be tested against a simulated controller.
+pub(crate) fn run<T: Transport>(open: impl Fn() -> Result<T, String>, shared: &Mutex<Snapshot>, stop: &AtomicBool, rx: &Receiver<Cmd>, repaint: &dyn Fn()) -> Result<(), String> {
+    let mut watch = Watch::default();
+    let mut transport = open()?;
+    loop {
+        let error = match serve(StatusLink::new(transport, MAGIC_644X), shared, stop, rx, repaint, &mut watch) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        let lost_at = Instant::now();
+        {
+            let mut s = shared.lock().unwrap();
+            if stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            s.conn = Conn::Connecting;
+            if s.job_active() {
+                watch.lost = true;
+            }
+        }
+        repaint();
+        transport = loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            if lost_at.elapsed() > RECONNECT_FOR {
+                return Err(error);
+            }
+            thread::sleep(RECONNECT_EVERY);
+            if let Ok(t) = open() {
+                break t;
+            }
+        };
+    }
+}
+
+/// Poll status and run commands until the link fails or we are stopped.
+fn serve<T: Transport>(mut link: StatusLink<T>, shared: &Mutex<Snapshot>, stop: &AtomicBool, rx: &Receiver<Cmd>, repaint: &dyn Fn(), watch: &mut Watch) -> Result<(), String> {
     link.timeout = Duration::from_millis(500);
     let mut status = link.status().map_err(|e| t!("err-no-answer", error = e.to_string()))?;
+    track_job(shared, &status, watch);
     publish(shared, repaint, &status, stop);
 
-    let mut watch = Watch::default();
     let mut failures = 0;
     while !stop.load(Ordering::Relaxed) {
         loop {
             match rx.try_recv() {
-                Ok(cmd) => link = handle(cmd, link, shared, rx, repaint, &mut watch),
+                Ok(cmd) => link = handle(cmd, link, shared, rx, repaint, watch),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return Ok(()),
             }
@@ -260,7 +307,7 @@ pub(crate) fn serve<T: Transport>(mut link: StatusLink<T>, shared: &Mutex<Snapsh
         match link.poll(&mut status) {
             Ok(()) => {
                 failures = 0;
-                track_job(shared, &status, &mut watch);
+                track_job(shared, &status, watch);
                 publish(shared, repaint, &status, stop);
             }
             Err(e) => {
@@ -346,7 +393,12 @@ fn track_job(shared: &Mutex<Snapshot>, status: &MachineStatus, watch: &mut Watch
     let Some(job) = s.job.as_mut().filter(|j| j.phase == JobPhase::Running) else { return };
     if status.state() == "idle" {
         watch.idle_polls += 1;
-        if watch.seen_busy && watch.idle_polls >= IDLE_TO_FINISH {
+        if (watch.seen_busy || watch.lost) && watch.idle_polls >= IDLE_TO_FINISH {
+            // After a dropout the machine may have finished (or never
+            // started) while we couldn't see it.
+            if watch.lost {
+                job.note = Some(t!("job-connection-gap"));
+            }
             job.phase = JobPhase::Finished;
             job.ended = Some(Instant::now());
         } else if !watch.seen_busy && job.started.elapsed() > START_TIMEOUT {
@@ -388,6 +440,8 @@ mod tests {
         received: Vec<u8>,
         busy_polls: u32,
         stopped: bool,
+        /// The USB adapter has dropped off: every read and write fails.
+        gone: bool,
     }
 
     #[derive(Clone, Default)]
@@ -397,6 +451,9 @@ mod tests {
         fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
             let plain = unscramble(data, MAGIC_644X);
             let mut sim = self.0.lock().unwrap();
+            if sim.gone {
+                return Err(io::Error::from_raw_os_error(6)); // ENXIO, as seen on macOS
+            }
             if let [0xDA, 0x00, hi, lo] = plain[..] {
                 let addr = u16::from_be_bytes([hi, lo]);
                 let value = match addr {
@@ -426,6 +483,9 @@ mod tests {
 
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             let mut sim = self.0.lock().unwrap();
+            if sim.gone {
+                return Err(io::Error::from_raw_os_error(6));
+            }
             let n = buf.len().min(sim.out.len());
             if n == 0 {
                 return Err(io::ErrorKind::TimedOut.into());
@@ -443,7 +503,8 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         let (s, sh, st) = (sim.clone(), shared.clone(), stop.clone());
-        thread::spawn(move || serve(StatusLink::new(s, MAGIC_644X), &sh, &st, &rx, &|| {}));
+        let open = move || if s.0.lock().unwrap().gone { Err("gone".to_string()) } else { Ok(s.clone()) };
+        thread::spawn(move || run(open, &sh, &st, &rx, &|| {}));
         (sim, shared, stop, tx)
     }
 
@@ -504,6 +565,47 @@ mod tests {
         let s = wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| !j.phase.active()));
         assert!(matches!(s.job.unwrap().phase, JobPhase::Failed(_)));
         assert!(!sim.0.lock().unwrap().stopped);
+        stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Unplug the simulated adapter, wait until we notice, then plug it back in.
+    fn drop_out(sim: &SimHandle, shared: &Mutex<Snapshot>, while_gone: impl FnOnce(&mut Sim)) {
+        sim.0.lock().unwrap().gone = true;
+        wait_for(shared, |s| s.conn == Conn::Connecting);
+        let mut s = sim.0.lock().unwrap();
+        while_gone(&mut s);
+        s.out.clear();
+        s.gone = false;
+    }
+
+    #[test]
+    fn a_job_keeps_being_followed_through_a_dropout() {
+        let (sim, shared, stop, tx) = start();
+        wait_for(&shared, |s| s.conn == Conn::Connected);
+        tx.send(Cmd::Send { plain: job(), estimate_s: 1.0, kind: JobKind::Job }).unwrap();
+        wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| j.phase == JobPhase::Running));
+        drop_out(&sim, &shared, |s| s.busy_polls = 3);
+        let s = wait_for(&shared, |s| s.conn == Conn::Connected);
+        assert_eq!(s.job.as_ref().unwrap().phase, JobPhase::Running, "still running after reconnecting");
+        let s = wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| !j.phase.active()));
+        let j = s.job.unwrap();
+        assert_eq!(j.phase, JobPhase::Finished);
+        assert!(j.note.is_some(), "the user is told the connection dropped");
+        stop.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn a_job_that_ends_during_a_dropout_counts_as_finished() {
+        let (sim, shared, stop, tx) = start();
+        wait_for(&shared, |s| s.conn == Conn::Connected);
+        tx.send(Cmd::Send { plain: job(), estimate_s: 1.0, kind: JobKind::Job }).unwrap();
+        wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| j.phase == JobPhase::Running));
+        drop_out(&sim, &shared, |s| s.busy_polls = 0);
+        let s = wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| !j.phase.active()));
+        let j = s.job.unwrap();
+        assert_eq!(j.phase, JobPhase::Finished);
+        assert!(j.note.is_some());
+        assert_eq!(s.conn, Conn::Connected);
         stop.store(true, Ordering::Relaxed);
     }
 }
