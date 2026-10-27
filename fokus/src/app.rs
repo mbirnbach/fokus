@@ -1008,7 +1008,14 @@ impl FokusApp {
                         };
                         (pal.accent, label)
                     }
-                    (Conn::Connected, Some(s)) => (if s.state() == "idle" { pal.ok } else { pal.warn }, format!("{}  ·  X {:.1}  Y {:.1}", state_label(s.state()), s.position.0, s.position.1)),
+                    (Conn::Connected, Some(s)) => {
+                        // The controller calls any run a job; name it after what we last sent.
+                        let state = match (s.state(), snap.job.as_ref().map(|j| j.kind)) {
+                            ("job running", Some(JobKind::Frame)) => t!("state-frame-running"),
+                            (state, _) => state_label(state),
+                        };
+                        (if s.state() == "idle" { pal.ok } else { pal.warn }, format!("{state}  ·  X {:.1}  Y {:.1}", s.position.0, s.position.1))
+                    }
                     (Conn::Connecting, _) => (pal.warn, t!("status-connecting")),
                     (Conn::Failed(_), _) => (pal.err, t!("status-problem")),
                     _ => (pal.muted, t!("status-offline")),
@@ -1753,7 +1760,7 @@ impl FokusApp {
                 };
                 (title, pal.ok, 1.0, t!("took", time = clock(elapsed)))
             }
-            JobPhase::Stopped => (t!("job-stopped"), pal.warn, 0.0, t!("after", time = clock(elapsed))),
+            JobPhase::Stopped => (if job.kind == JobKind::Frame { t!("frame-stopped") } else { t!("job-stopped") }, pal.warn, 0.0, t!("after", time = clock(elapsed))),
             JobPhase::Failed(e) => (t!("job-failed"), pal.err, 0.0, e.clone()),
         };
         Frame::new().fill(color.gamma_multiply(0.08)).stroke(Stroke::new(1.0, color.gamma_multiply(0.4))).corner_radius(12).inner_margin(Margin::same(12)).show(ui, |ui| {

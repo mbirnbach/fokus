@@ -118,6 +118,7 @@ start-job = Auftrag starten
 start-job-dots = Auftrag starten…
 start-warning = Der Auftrag beginnt, sobald du auf Starten drückst. Bleib an der Maschine; Stopp findest du rechts im Fenster und an der Maschine.
 state-idle = Bereit
+state-frame-running = Umriss läuft
 state-job-running = Auftrag läuft
 state-moving = In Bewegung
 state-part-end = Teil fertig
@@ -276,6 +277,7 @@ untested-warning = Ungetestete Einstellungen: zuerst an einem Reststück ausprob
 frame = Umriss
 frame-hint = Fährt den Kopf einmal mit ausgeschaltetem Laser um das Design, damit du siehst, wo es landet
 frame-finished = Umriss abgefahren
+frame-stopped = Umriss gestoppt
 status-framing = Umriss wird abgefahren…
 
 # Editor

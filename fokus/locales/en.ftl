@@ -118,6 +118,7 @@ start-job = Start job
 start-job-dots = Start job…
 start-warning = The job starts as soon as you press Start. Stay at the machine; Stop is in the right panel and on the machine.
 state-idle = Idle
+state-frame-running = Frame running
 state-job-running = Job running
 state-moving = Moving
 state-part-end = Part end
@@ -276,6 +277,7 @@ untested-warning = Untested settings: try them on a scrap piece first.
 frame = Frame
 frame-hint = Moves the head once around the design with the laser off, so you can see where it will go
 frame-finished = Frame finished
+frame-stopped = Frame stopped
 status-framing = Framing…
 
 # Editor
