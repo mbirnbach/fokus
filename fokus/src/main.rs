@@ -25,7 +25,8 @@ use eframe::egui;
 const USAGE: &str = "usage: fokus [design.svg | job.rd]\n       fokus design.svg --export job.rd --material \"Pappelsperrholz 4 mm\" [--anchor top-right|centre] [--dry-run]";
 
 fn main() -> eframe::Result {
-    i18n::set_language(settings::Settings::load().language.as_deref());
+    let settings = settings::Settings::load();
+    i18n::set_language(settings.language.as_deref());
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let open = args.first().map(std::path::PathBuf::from);
 
@@ -49,7 +50,7 @@ fn main() -> eframe::Result {
         "Fokus",
         options,
         Box::new(|cc| {
-            theme::apply(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx, settings.theme.as_deref());
             Ok(Box::new(app::FokusApp::new(open)))
         }),
     )

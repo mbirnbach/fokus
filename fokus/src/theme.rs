@@ -255,11 +255,12 @@ fn style(style: &mut egui::Style, pal: &Palette) {
     v.widgets.open.weak_bg_fill = pal.hover;
 }
 
-pub fn apply(ctx: &egui::Context) {
-    // FOKUS_THEME=light|dark forces a theme at startup (handy for screenshots).
-    let pref = match std::env::var("FOKUS_THEME").as_deref() {
-        Ok("light") => ThemePreference::Light,
-        Ok("dark") => ThemePreference::Dark,
+/// `saved` is the theme from the settings ("light", "dark" or none for the
+/// system's). FOKUS_THEME=light|dark overrides it (handy for screenshots).
+pub fn apply(ctx: &egui::Context, saved: Option<&str>) {
+    let pref = match std::env::var("FOKUS_THEME").ok().as_deref().or(saved) {
+        Some("light") => ThemePreference::Light,
+        Some("dark") => ThemePreference::Dark,
         _ => ThemePreference::System,
     };
     ctx.set_theme(pref);

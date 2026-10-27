@@ -10,6 +10,9 @@ pub struct Settings {
     /// Language code ("en", "de", or a community file); `None` follows the system.
     #[serde(default)]
     pub language: Option<String>,
+    /// "light" or "dark"; `None` follows the system.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 impl Settings {

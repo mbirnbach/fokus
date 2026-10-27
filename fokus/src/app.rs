@@ -1309,7 +1309,7 @@ impl FokusApp {
 
     /// Right-click menu on the canvas.
     fn canvas_menu(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(240.0);
+        ui.set_width(250.0);
         let ctx = ui.ctx().clone();
         let cmd = |k: Key| shortcut(&ctx, Modifiers::COMMAND, k);
         let has = !self.selection.is_empty();
@@ -1445,6 +1445,12 @@ fn font_picker(ui: &mut egui::Ui, family: &mut String, filter: &mut String) -> b
     icons::paint(ui.painter(), Rect::from_center_size(rect.right_center() - Vec2::new(14.0, 0.0), Vec2::splat(14.0)), Icon::ChevronDown, pal.muted);
     let response = response.on_hover_text(t!("font"));
     let mut changed = false;
+    // Keyboard highlight: (search it belongs to, row). Reset when the list opens.
+    let hl_id = response.id.with("highlight");
+    if response.clicked() {
+        filter.clear();
+        ui.data_mut(|d| d.remove::<(String, usize)>(hl_id));
+    }
     egui::Popup::from_toggle_button_response(&response).close_behavior(PopupCloseBehavior::CloseOnClickOutside).width(300.0).show(|ui| {
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
@@ -1455,11 +1461,38 @@ fn font_picker(ui: &mut egui::Ui, family: &mut String, filter: &mut String) -> b
         let needle = filter.to_lowercase();
         let names: Vec<&String> = fonts::families().iter().filter(|f| needle.is_empty() || f.to_lowercase().contains(&needle)).collect();
         let row_h = 30.0;
-        egui::ScrollArea::vertical().max_height(360.0).show_rows(ui, row_h, names.len(), |ui, range| {
-            for name in &names[range] {
-                let selected = *name == family;
+        let list_h = 360.0;
+        let (mut hl, mut scroll) = match ui.data(|d| d.get_temp::<(String, usize)>(hl_id)) {
+            Some((n, i)) if n == needle => (i, false),
+            _ => (if needle.is_empty() { names.iter().position(|n| n.as_str() == family.as_str()).unwrap_or(0) } else { 0 }, true),
+        };
+        let (down, up, enter) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown), i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp), i.key_pressed(egui::Key::Enter)));
+        if down && hl + 1 < names.len() {
+            hl += 1;
+            scroll = true;
+        }
+        if up && hl > 0 {
+            hl -= 1;
+            scroll = true;
+        }
+        if enter && let Some(name) = names.get(hl) {
+            *family = name.to_string();
+            changed = true;
+            ui.close();
+        }
+        ui.data_mut(|d| d.insert_temp(hl_id, (needle.clone(), hl)));
+        let mut area = egui::ScrollArea::vertical().max_height(list_h);
+        if scroll {
+            // show_rows spaces rows by their height plus the item spacing.
+            let pitch = row_h + ui.spacing().item_spacing.y;
+            area = area.vertical_scroll_offset((hl as f32 * pitch - (list_h - row_h) / 2.0).max(0.0));
+        }
+        area.show_rows(ui, row_h, names.len(), |ui, range| {
+            for i in range {
+                let name = names[i];
+                let selected = name.as_str() == family.as_str();
                 let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
-                if selected || resp.hovered() {
+                if selected || resp.hovered() || i == hl {
                     ui.painter().rect_filled(r, 6.0, if selected { pal.accent.gamma_multiply(0.12) } else { pal.hover });
                 }
                 let color = if selected { pal.accent } else { pal.text };
@@ -1837,10 +1870,10 @@ impl FokusApp {
                             Conn::Failed(e) => (pal.err, e.clone()),
                             Conn::Disconnected => (pal.muted, t!("conn-disconnected")),
                         };
-                        ui.horizontal(|ui| {
+                        ui.horizontal_top(|ui| {
                             let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
                             icons::paint(ui.painter(), r, if snap.conn == Conn::Connected { Icon::Plug } else { Icon::Unplug }, color);
-                            ui.label(RichText::new(text).color(color).medium());
+                            ui.add(egui::Label::new(RichText::new(text).color(color).medium()).wrap());
                         });
                         ui.add_space(4.0);
                         ui.add_enabled_ui(!busy, |ui| {
@@ -1886,6 +1919,12 @@ impl FokusApp {
                         let mut pref = ui.ctx().options(|o| o.theme_preference);
                         if widgets::segmented(ui, &mut pref, &[(egui::ThemePreference::System, t!("theme-system")), (egui::ThemePreference::Light, t!("theme-light")), (egui::ThemePreference::Dark, t!("theme-dark"))]) {
                             ui.ctx().set_theme(pref);
+                            self.settings.theme = match pref {
+                                egui::ThemePreference::Light => Some("light".into()),
+                                egui::ThemePreference::Dark => Some("dark".into()),
+                                egui::ThemePreference::System => None,
+                            };
+                            self.settings.save();
                         }
                         ui.add_space(6.0);
                         ui.checkbox(&mut self.show_travel, t!("show-travel"));
