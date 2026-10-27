@@ -15,10 +15,13 @@ cargo run -p fokus -- fokus/examples/tag.svg --export tag.rd --material "Pappels
 - **Properties bar**: X/Y/W/H in mm (X/Y = corner nearest the machine
   origin), aspect lock, rotation, corner radius / polygon sides / text, font,
   Duplicate, Group/Ungroup, mirror, Align, Delete.
-- **Tools** (left): Select (V), Rectangle (R), Ellipse (E), Polygon (P),
-  Line (L, click points, double-click or Enter to finish), Text (T).
-  Shift keeps squares / circles; drag handles to resize; arrows nudge 1 mm
-  (Shift: 10 mm); ⌘Z/⇧⌘Z, ⌘D, ⌘G/⇧⌘G, ⌘A; Space+drag pans, wheel zooms.
+- **Tools** (left): Select (V), Points (A), Rectangle (R), Ellipse (E),
+  Polygon (Y), Pen (P), Text (T, edited in place on the canvas). Shift keeps
+  squares / circles and snaps rotation to 15°; Alt resizes from the centre;
+  arrows nudge 1 mm (Shift: 10 mm); ⌘Z/⇧⌘Z, ⌘C/⌘X/⌘V, ⌘D, ⌘G/⇧⌘G, ⌘A,
+  ⌘]/⌘[; Space+drag or right-drag pans, wheel zooms; right-click for the
+  context menu. Shapes and text are Bézier paths (`bezier.rs`); "Convert to
+  path" makes them editable point by point.
 - **Colour palette** (bottom): each colour is a layer; click a colour to use
   it for new shapes and to move the selection to that layer.
 - **Right panel**: one material for the job, the layer list (Cut / Mark /
