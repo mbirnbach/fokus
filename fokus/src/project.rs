@@ -14,7 +14,8 @@ use crate::t;
 
 pub const EXTENSION: &str = "fokus";
 const FORMAT: &str = "fokus-project";
-const VERSION: u32 = 1;
+/// 2: paths as Bézier curves, text with any font family.
+const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
@@ -51,6 +52,9 @@ impl Project {
             None => return Err(t!("err-project-no-version")),
         }
         let mut project: Project = serde_json::from_str(json).map_err(|e| t!("err-project-damaged", error = e.to_string()))?;
+        for o in &mut project.design.objects {
+            o.fix_text();
+        }
         project.design.touch();
         Ok(project)
     }
@@ -72,7 +76,7 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::design::{Action, Font, Kind, Object};
+    use crate::design::{Action, Kind, Object, TextStyle};
     use crate::materials::Operation;
 
     fn sample() -> Project {
@@ -81,7 +85,7 @@ mod tests {
         let mut circle = Object::new(Kind::Ellipse, (15.0, 35.0, 6.0, 6.0), [0, 0, 0]);
         circle.rotation = 30.0;
         d.add(circle);
-        d.add(Object::text("Hallo", Font::Serif, true, (30.0, 30.0), 12.0, [224, 49, 49]).unwrap());
+        d.add(Object::text("Hallo", TextStyle { bold: true, ..TextStyle::default() }, (30.0, 40.0), 12.0, [224, 49, 49]).unwrap());
         d.group(&[0, 1]);
         d.layers[0].action = Action::Do(Operation::Cut);
         d.layers[1].action = Action::Skip;
@@ -113,8 +117,25 @@ mod tests {
     fn foreign_and_future_files_are_refused() {
         assert_eq!(Project::from_json("{\"objects\": []}").unwrap_err(), t!("err-not-a-project"));
         assert!(Project::from_json("not json").is_err());
-        let future = sample().to_json().replace("\"version\":1", "\"version\":99");
+        let future = sample().to_json().replace("\"version\":2", "\"version\":99");
         assert_eq!(Project::from_json(&future).unwrap_err(), t!("err-project-newer", version = 99));
+    }
+
+    #[test]
+    fn version_1_files_still_open() {
+        // Points instead of curves, and one of three fixed fonts.
+        let json = r#"{"format":"fokus-project","version":1,"material":null,"anchor":{"h":1,"v":-1},
+            "design":{"next_group":0,"layers":[],"objects":[
+              {"name":"Line","kind":{"Path":{"polylines":[[[0.0,0.0],[1.0,1.0]]],"filled":false}},"x":5.0,"y":5.0,"w":10.0,"h":10.0,"rotation":0.0,"flip_x":false,"flip_y":false,"color":[0,0,0],"group":null},
+              {"name":"Text","kind":{"Text":{"text":"Hi","font":"Serif","bold":false,"outlines":[[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,0.0]]],"aspect":1.5}},"x":0.0,"y":0.0,"w":15.0,"h":10.0,"rotation":0.0,"flip_x":false,"flip_y":false,"color":[224,49,49],"group":null}]}}"#;
+        let p = Project::from_json(json).unwrap();
+        assert_eq!(p.design.objects[0].outline(), vec![vec![(5.0, 5.0), (15.0, 15.0)]]);
+        let Kind::Text { style, scale, .. } = &p.design.objects[1].kind else { panic!() };
+        assert!(crate::fonts::families().contains(&style.family));
+        assert!(scale.0 > 0.0 && scale.1 > 0.0);
+        // Saved outlines are kept until the text is edited.
+        assert_eq!(p.design.objects[1].outline()[0].len(), 4);
+        assert_eq!(p.design.layers.len(), 2);
     }
 
     #[test]

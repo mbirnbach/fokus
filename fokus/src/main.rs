@@ -4,15 +4,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod bezier;
 mod canvas;
 mod design;
+mod fonts;
 mod i18n;
+mod icons;
 mod job;
 mod machine;
 mod materials;
+mod paths;
 mod project;
 mod settings;
+mod textedit;
 mod theme;
+mod widgets;
 
 use eframe::egui;
 

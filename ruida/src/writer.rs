@@ -48,6 +48,9 @@ pub struct JobLayer {
     pub air_assist: bool,
     /// Polylines (Cut) or closed outlines (Engrave) in µm, relative to the head.
     pub paths: Vec<Vec<(i32, i32)>>,
+    /// Engrave: how `paths` form filled shapes (see [`fill::spans_shapes`]);
+    /// empty fills all paths as one even-odd shape.
+    pub shapes: Vec<fill::Shape>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,7 +101,7 @@ const MAX_REL: i32 = 8191;
 fn has_geometry(l: &JobLayer) -> bool {
     match l.kind {
         LayerKind::Cut => l.paths.iter().any(|p| p.len() >= 2),
-        LayerKind::Engrave { interval } => !fill::scan(&l.paths, interval).is_empty(),
+        LayerKind::Engrave { interval } => !fill::scan_shapes(&l.paths, &l.shapes, interval).is_empty(),
     }
 }
 
@@ -200,7 +203,7 @@ fn write_engrave_body(o: &mut Out, l: &JobLayer, interval: i32) {
     o.op(&[0xC6, 0x13]).op(&encode_u35(0));
     o.op(&[0xCA, 0x03, 0x01]);
 
-    let lines = fill::scan(&l.paths, interval);
+    let lines = fill::scan_shapes(&l.paths, &l.shapes, interval);
     for _ in 0..l.passes {
         let mut pos: Option<(i32, i32)> = None;
         for line in &lines {

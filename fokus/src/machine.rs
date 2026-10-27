@@ -50,6 +50,16 @@ impl JobPhase {
     }
 }
 
+/// What a sent job is for; the laser only fires for `Job`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobKind {
+    Job,
+    /// The whole job with the laser off, to check the path.
+    DryRun,
+    /// The box around the design with the laser off, to check the position.
+    Frame,
+}
+
 #[derive(Debug, Clone)]
 pub struct JobProgress {
     pub phase: JobPhase,
@@ -59,16 +69,15 @@ pub struct JobProgress {
     pub ended: Option<Instant>,
     /// Expected laser time, for the progress bar.
     pub estimate_s: f64,
-    /// Sent with the laser off, to check the path.
-    pub dry_run: bool,
+    pub kind: JobKind,
     /// Time spent paused so far, and since when it is paused now.
     pub paused_total: Duration,
     pub paused_since: Option<Instant>,
 }
 
 impl JobProgress {
-    fn new(total: usize, estimate_s: f64, dry_run: bool) -> Self {
-        JobProgress { phase: JobPhase::Sending, sent: 0, total, started: Instant::now(), ended: None, estimate_s, dry_run, paused_total: Duration::ZERO, paused_since: None }
+    fn new(total: usize, estimate_s: f64, kind: JobKind) -> Self {
+        JobProgress { phase: JobPhase::Sending, sent: 0, total, started: Instant::now(), ended: None, estimate_s, kind, paused_total: Duration::ZERO, paused_since: None }
     }
 
     /// Time the job has been working (pauses don't count).
@@ -95,7 +104,7 @@ impl Snapshot {
 }
 
 pub enum Cmd {
-    Send { plain: Vec<u8>, estimate_s: f64, dry_run: bool },
+    Send { plain: Vec<u8>, estimate_s: f64, kind: JobKind },
     Pause,
     Resume,
     Stop,
@@ -157,7 +166,7 @@ impl Machine {
     }
 
     /// Send a job; it starts at the head as soon as it arrives.
-    pub fn start_job(&self, plain: Vec<u8>, estimate_s: f64, dry_run: bool) -> Result<(), String> {
+    pub fn start_job(&self, plain: Vec<u8>, estimate_s: f64, kind: JobKind) -> Result<(), String> {
         let snap = self.snapshot();
         if snap.conn != Conn::Connected {
             return Err(t!("err-not-connected"));
@@ -169,8 +178,8 @@ impl Machine {
             return Err(t!("err-laser-busy"));
         }
         let tx = self.tx.as_ref().ok_or_else(|| t!("err-not-connected"))?;
-        set_job(&self.shared, Some(JobProgress::new(plain.len(), estimate_s, dry_run)));
-        tx.send(Cmd::Send { plain, estimate_s, dry_run }).map_err(|_| t!("err-connection-lost"))
+        set_job(&self.shared, Some(JobProgress::new(plain.len(), estimate_s, kind)));
+        tx.send(Cmd::Send { plain, estimate_s, kind }).map_err(|_| t!("err-connection-lost"))
     }
 
     pub fn pause_job(&self) {
@@ -268,8 +277,8 @@ pub(crate) fn serve<T: Transport>(mut link: StatusLink<T>, shared: &Mutex<Snapsh
 fn handle<T: Transport>(cmd: Cmd, link: StatusLink<T>, shared: &Mutex<Snapshot>, rx: &Receiver<Cmd>, repaint: &dyn Fn(), watch: &mut Watch) -> StatusLink<T> {
     let mut sender = JobSender::new(link.into_transport(), MAGIC_644X);
     match cmd {
-        Cmd::Send { plain, estimate_s, dry_run } => {
-            set_job(shared, Some(JobProgress::new(plain.len(), estimate_s, dry_run)));
+        Cmd::Send { plain, estimate_s, kind } => {
+            set_job(shared, Some(JobProgress::new(plain.len(), estimate_s, kind)));
             let mut stop_requested = false;
             let result = sender.send_job(&plain, |sent, _| {
                 update_job(shared, |j| j.sent = sent);
@@ -464,7 +473,7 @@ mod tests {
     fn job_is_sent_runs_and_finishes() {
         let (sim, shared, stop, tx) = start();
         wait_for(&shared, |s| s.conn == Conn::Connected);
-        tx.send(Cmd::Send { plain: job(), estimate_s: 1.0, dry_run: false }).unwrap();
+        tx.send(Cmd::Send { plain: job(), estimate_s: 1.0, kind: JobKind::Job }).unwrap();
         let s = wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| !j.phase.active()));
         let j = s.job.unwrap();
         assert_eq!(j.phase, JobPhase::Finished);
@@ -477,7 +486,7 @@ mod tests {
     fn stop_ends_a_running_job() {
         let (sim, shared, stop, tx) = start();
         wait_for(&shared, |s| s.conn == Conn::Connected);
-        tx.send(Cmd::Send { plain: job(), estimate_s: 1.0, dry_run: false }).unwrap();
+        tx.send(Cmd::Send { plain: job(), estimate_s: 1.0, kind: JobKind::Job }).unwrap();
         wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| j.phase == JobPhase::Running));
         tx.send(Cmd::Stop).unwrap();
         let s = wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| !j.phase.active()));
@@ -491,7 +500,7 @@ mod tests {
         let (sim, shared, stop, tx) = start();
         wait_for(&shared, |s| s.conn == Conn::Connected);
         // No start-process command: the simulated machine stays idle.
-        tx.send(Cmd::Send { plain: vec![0xD8, 0x12, 0xD7], estimate_s: 1.0, dry_run: false }).unwrap();
+        tx.send(Cmd::Send { plain: vec![0xD8, 0x12, 0xD7], estimate_s: 1.0, kind: JobKind::Job }).unwrap();
         let s = wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| !j.phase.active()));
         assert!(matches!(s.job.unwrap().phase, JobPhase::Failed(_)));
         assert!(!sim.0.lock().unwrap().stopped);

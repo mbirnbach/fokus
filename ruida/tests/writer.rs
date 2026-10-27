@@ -23,6 +23,7 @@ fn square_layer() -> JobLayer {
         passes: 1,
         air_assist: true,
         paths: vec![vec![(25_000, 0), (0, 0), (0, 25_000), (25_000, 25_000), (25_000, 0)]],
+        shapes: Vec::new(),
     }
 }
 
@@ -124,6 +125,7 @@ fn long_engrave_lines_are_split_and_decode_back() {
         passes: 2,
         air_assist: true,
         paths: vec![vec![(0, 0), (30_000, 0), (30_000, 2_000), (0, 2_000)]],
+        shapes: Vec::new(),
     };
     let tp = Toolpath::from_records(&parse(&write_plain(&[bar]).unwrap()));
     assert_eq!(tp.unknown_commands, 0);
@@ -156,6 +158,7 @@ fn each_layer_body_gets_its_own_work_mode() {
         passes: 1,
         air_assist: true,
         paths: vec![vec![(5_000, 5_000), (20_000, 5_000), (20_000, 10_000), (5_000, 10_000)]],
+        shapes: Vec::new(),
     };
     let plain = write_plain(&[engrave, square_layer()]).unwrap();
     let body = |part: u8| {

@@ -11,12 +11,15 @@
 //! material supplies the speed and power for that operation.
 
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
 
+use ruida::fill::{FillRule, Shape as FillShape};
 use ruida::writer::{JobLayer, LayerKind};
 use serde::{Deserialize, Serialize};
 
+use crate::bezier::{self, SubPath};
+use crate::fonts::{self, Ink};
 use crate::materials::{Material, OpSettings, Operation};
+use crate::paths;
 use crate::t;
 
 pub type Pt = (f64, f64);
@@ -32,46 +35,116 @@ const LINE_TURN_S: f64 = 0.12;
 const PATH_START_S: f64 = 0.2;
 /// Smallest width / height an object can be resized to.
 pub const MIN_SIZE: f64 = 0.1;
-pub const DEFAULT_TEXT_HEIGHT: f64 = 10.0;
+/// Font size of new text (one em), mm.
+pub const DEFAULT_TEXT_SIZE: f64 = 12.0;
+/// Speed of the Frame move around the design (mm/s, laser off).
+pub const FRAME_SPEED: f64 = 100.0;
 
 // ---------------------------------------------------------------- objects
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Font {
-    Sans,
-    Serif,
-    Mono,
+/// Text settings: family name, weight and slant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextStyle {
+    pub family: String,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
 }
 
-impl Font {
-    pub const ALL: [Font; 3] = [Font::Sans, Font::Serif, Font::Mono];
-
-    pub fn label(self) -> String {
-        match self {
-            Font::Sans => t!("font-sans"),
-            Font::Serif => t!("font-serif"),
-            Font::Mono => t!("font-mono"),
-        }
+impl TextStyle {
+    pub fn fonts(&self) -> fonts::Style {
+        fonts::Style { family: self.family.clone(), bold: self.bold, italic: self.italic }
     }
+}
 
-    fn family(self) -> &'static str {
-        match self {
-            Font::Sans => "Helvetica, Arial, Liberation Sans, DejaVu Sans, sans-serif",
-            Font::Serif => "Georgia, Times New Roman, Liberation Serif, DejaVu Serif, serif",
-            Font::Mono => "Menlo, Consolas, Liberation Mono, DejaVu Sans Mono, monospace",
-        }
+impl Default for TextStyle {
+    fn default() -> Self {
+        TextStyle { family: fonts::DEFAULT_FAMILY.into(), bold: false, italic: false }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "KindFile")]
 pub enum Kind {
     Rect { radius: f64 },
     Ellipse,
     Polygon { sides: u32 },
-    /// Drawn lines or imported paths, normalised to 0..1 of the object's box.
-    Path { polylines: Vec<Vec<Pt>>, filled: bool },
-    /// Text as outlines, normalised to 0..1 of the object's box.
-    Text { text: String, font: Font, bold: bool, outlines: Vec<Vec<Pt>>, aspect: f64 },
+    /// Drawn or imported paths, normalised to 0..1 of the object's box.
+    /// Engraving fills them with the non-zero rule unless `even_odd` (as the
+    /// SVG they came from asked).
+    Path { subpaths: Vec<SubPath>, filled: bool, even_odd: bool },
+    /// Text as outlines, normalised to 0..1 of the object's box. `ink` is
+    /// the outlines' box in layout units, `scale` mm per layout unit (x, y).
+    Text { text: String, style: TextStyle, outlines: Vec<SubPath>, ink: Ink, scale: (f64, f64) },
+}
+
+/// How objects are read from project files; older files stored paths as
+/// point lists and text with one of three fonts.
+#[derive(Deserialize)]
+enum KindFile {
+    Rect { radius: f64 },
+    Ellipse,
+    Polygon { sides: u32 },
+    Path {
+        #[serde(default)]
+        subpaths: Vec<SubPath>,
+        #[serde(default)]
+        polylines: Vec<Vec<Pt>>,
+        filled: bool,
+        #[serde(default)]
+        even_odd: bool,
+    },
+    Text {
+        text: String,
+        #[serde(default)]
+        style: Option<TextStyle>,
+        /// Version 1: "Sans", "Serif" or "Mono".
+        #[serde(default)]
+        font: Option<String>,
+        #[serde(default)]
+        bold: bool,
+        outlines: OutlinesFile,
+        #[serde(default)]
+        ink: Option<Ink>,
+        #[serde(default)]
+        scale: Option<(f64, f64)>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OutlinesFile {
+    Curves(Vec<SubPath>),
+    Points(Vec<Vec<Pt>>),
+}
+
+impl OutlinesFile {
+    fn curves(self) -> Vec<SubPath> {
+        match self {
+            OutlinesFile::Curves(c) => c,
+            OutlinesFile::Points(p) => p.iter().map(|pl| SubPath::polyline(pl)).collect(),
+        }
+    }
+}
+
+impl From<KindFile> for Kind {
+    fn from(k: KindFile) -> Self {
+        match k {
+            KindFile::Rect { radius } => Kind::Rect { radius },
+            KindFile::Ellipse => Kind::Ellipse,
+            KindFile::Polygon { sides } => Kind::Polygon { sides },
+            KindFile::Path { mut subpaths, polylines, filled, even_odd } => {
+                subpaths.extend(polylines.iter().map(|pl| SubPath::polyline(pl)));
+                Kind::Path { subpaths, filled, even_odd }
+            }
+            KindFile::Text { text, style, font, bold, outlines, ink, scale } => {
+                let style = style.unwrap_or_else(|| TextStyle { family: fonts::legacy_family(font.as_deref().unwrap_or("Sans")), bold, italic: false });
+                // Old files have no layout box: recompute it below (`Object::fix_text`).
+                Kind::Text { text, style, outlines: outlines.curves(), ink: ink.unwrap_or_default(), scale: scale.unwrap_or((0.0, 0.0)) }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,30 +176,69 @@ impl Object {
         Object { name, kind, x, y, w, h, rotation: 0.0, flip_x: false, flip_y: false, color, group: None }
     }
 
-    /// A line or polyline through `points` (mm).
-    pub fn polyline(points: Vec<Pt>, color: [u8; 3]) -> Self {
-        let (polylines, (x, y, w, h)) = normalise(vec![points]);
-        let mut o = Object::new(Kind::Path { polylines, filled: false }, (x, y, w, h), color);
-        o.name = t!("object-line");
-        o
+    /// A path from sub-paths in design mm.
+    pub fn path(subpaths: Vec<SubPath>, color: [u8; 3]) -> Self {
+        let (subpaths, rect) = normalise(subpaths);
+        Object::new(Kind::Path { subpaths, filled: false, even_odd: false }, rect, color)
     }
 
-    /// Text with its outlines rendered; `h` is the height of the lettering.
-    pub fn text(text: &str, font: Font, bold: bool, (x, y): Pt, h: f64, color: [u8; 3]) -> Result<Self, String> {
-        let mut o = Object::new(Kind::Text { text: String::new(), font, bold, outlines: Vec::new(), aspect: 1.0 }, (x, y, h, h), color);
-        o.set_text(text, font, bold)?;
+    /// Text whose first baseline starts at `origin`; `size` is the font size
+    /// (one em) in mm.
+    pub fn text(text: &str, style: TextStyle, origin: Pt, size: f64, color: [u8; 3]) -> Result<Self, String> {
+        let s = size / fonts::EM;
+        let empty = Kind::Text { text: String::new(), style: style.clone(), outlines: Vec::new(), ink: Ink::default(), scale: (s, s) };
+        // An empty layout has its box at the layout origin (top of the first line).
+        let mut o = Object::new(empty, (origin.0, origin.1 - fonts::EM * s, 0.0, 0.0), color);
+        o.set_text(text, style)?;
         Ok(o)
     }
 
-    /// Change a text object's content or font; keeps the height.
-    pub fn set_text(&mut self, text: &str, font: Font, bold: bool) -> Result<(), String> {
-        let Kind::Text { .. } = self.kind else { return Err("not a text object".into()) };
-        let outlines = text_outlines(text, font, bold)?;
-        let (outlines, (_, _, w, h)) = normalise(outlines);
-        let aspect = if h > 0.0 { w / h } else { 1.0 };
-        self.w = (self.h * aspect).max(MIN_SIZE);
-        self.kind = Kind::Text { text: text.to_string(), font, bold, outlines, aspect };
+    /// Change a text object's content or style. The letters keep their size
+    /// and the start of the first line stays where it is.
+    pub fn set_text(&mut self, text: &str, style: TextStyle) -> Result<(), String> {
+        self.fix_text();
+        let Kind::Text { ink, scale: (sx, sy), .. } = self.kind else { return Err("not a text object".into()) };
+        let layout = fonts::layout(text, &style.fonts())?;
+        // Where the layout origin is now, in the box and on the bed.
+        let local_origin = |ink: &Ink| (-ink.x0 * sx, -ink.y0 * sy);
+        let before = self.to_world(local_origin(&ink));
+        let (w, h) = (layout.ink.w * sx, layout.ink.h * sy);
+        let (outlines, _) = normalise(layout.outlines);
+        self.w = w;
+        self.h = h;
+        self.kind = Kind::Text { text: text.to_string(), style, outlines, ink: layout.ink, scale: (sx, sy) };
+        let after = self.to_world(local_origin(&layout.ink));
+        self.x += before.0 - after.0;
+        self.y += before.1 - after.1;
         Ok(())
+    }
+
+    /// Text from version 1 files has no layout box or scale; work them out
+    /// from its content (keeps the outlines it was saved with).
+    pub fn fix_text(&mut self) {
+        let Kind::Text { text, style, ink, scale, .. } = &mut self.kind else { return };
+        if scale.0 > 0.0 {
+            return;
+        }
+        match fonts::layout(text, &style.fonts()) {
+            Ok(l) if l.ink.w > 0.0 && l.ink.h > 0.0 => {
+                *ink = l.ink;
+                *scale = (self.w / l.ink.w, self.h / l.ink.h);
+            }
+            _ => {
+                let s = self.h.max(1.0) / fonts::EM;
+                *scale = (s, s);
+            }
+        }
+    }
+
+    /// How engraving fills the shape: fonts and drawn shapes use the
+    /// non-zero rule (overlapping parts of a letter stay filled).
+    pub fn fill_rule(&self) -> FillRule {
+        match self.kind {
+            Kind::Path { even_odd: true, .. } => FillRule::EvenOdd,
+            _ => FillRule::NonZero,
+        }
     }
 
     /// Filled shapes suggest engraving rather than cutting.
@@ -134,45 +246,45 @@ impl Object {
         matches!(self.kind, Kind::Path { filled: true, .. } | Kind::Text { .. })
     }
 
-    /// Outline in mm relative to the box's top-left, before rotation.
-    fn local(&self) -> Vec<Vec<Pt>> {
+    /// The shape as curves in mm relative to the box's top-left, before
+    /// flipping and rotation.
+    fn local_curves(&self) -> Vec<SubPath> {
         let (w, h) = (self.w, self.h);
-        let mut out = match &self.kind {
-            Kind::Rect { radius } => vec![rounded_rect(w, h, *radius)],
-            Kind::Ellipse => vec![ellipse(w, h)],
-            Kind::Polygon { sides } => vec![regular_polygon(w, h, *sides)],
-            Kind::Path { polylines, .. } | Kind::Text { outlines: polylines, .. } => {
-                polylines.iter().map(|pl| pl.iter().map(|&(u, v)| (u * w, v * h)).collect()).collect()
-            }
-        };
-        if self.flip_x || self.flip_y {
-            for p in out.iter_mut().flatten() {
-                if self.flip_x {
-                    p.0 = w - p.0;
-                }
-                if self.flip_y {
-                    p.1 = h - p.1;
-                }
-            }
+        match &self.kind {
+            Kind::Rect { radius } => vec![bezier::rect(w, h, *radius)],
+            Kind::Ellipse => vec![bezier::ellipse(w, h)],
+            Kind::Polygon { sides } => vec![bezier::polygon(w, h, *sides)],
+            Kind::Path { subpaths, .. } | Kind::Text { outlines: subpaths, .. } => subpaths.iter().map(|s| s.map(&|(u, v)| (u * w, v * h))).collect(),
         }
-        out
+    }
+
+    /// Box-local mm (before flipping) → design mm.
+    pub fn to_world(&self, (px, py): Pt) -> Pt {
+        let (cx, cy) = (self.w / 2.0, self.h / 2.0);
+        let px = if self.flip_x { self.w - px } else { px };
+        let py = if self.flip_y { self.h - py } else { py };
+        let (sin, cos) = self.rotation.to_radians().sin_cos();
+        let (dx, dy) = (px - cx, py - cy);
+        (self.x + cx + dx * cos - dy * sin, self.y + cy + dx * sin + dy * cos)
+    }
+
+    /// Design mm → box-local mm (before flipping); the inverse of `to_world`.
+    pub fn to_local(&self, (x, y): Pt) -> Pt {
+        let (cx, cy) = (self.w / 2.0, self.h / 2.0);
+        let (sin, cos) = self.rotation.to_radians().sin_cos();
+        let (dx, dy) = (x - self.x - cx, y - self.y - cy);
+        let (px, py) = (cx + dx * cos + dy * sin, cy - dx * sin + dy * cos);
+        (if self.flip_x { self.w - px } else { px }, if self.flip_y { self.h - py } else { py })
+    }
+
+    /// The shape as curves in design coordinates.
+    pub fn curves(&self) -> Vec<SubPath> {
+        self.local_curves().iter().map(|s| s.map(&|p| self.to_world(p))).collect()
     }
 
     /// Outline in design coordinates.
     pub fn outline(&self) -> Vec<Vec<Pt>> {
-        let (cx, cy) = (self.w / 2.0, self.h / 2.0);
-        let (sin, cos) = self.rotation.to_radians().sin_cos();
-        self.local()
-            .into_iter()
-            .map(|pl| {
-                pl.into_iter()
-                    .map(|(px, py)| {
-                        let (dx, dy) = (px - cx, py - cy);
-                        (self.x + cx + dx * cos - dy * sin, self.y + cy + dx * sin + dy * cos)
-                    })
-                    .collect()
-            })
-            .collect()
+        bezier::flatten_all(&self.curves(), FLATTEN_TOLERANCE_MM)
     }
 
     pub fn bounds(&self) -> Bounds {
@@ -181,46 +293,40 @@ impl Object {
         }
         points_bounds(self.outline().iter().flatten()).unwrap_or(((self.x, self.y), (self.x, self.y)))
     }
-}
 
-fn rounded_rect(w: f64, h: f64, radius: f64) -> Vec<Pt> {
-    let r = radius.clamp(0.0, w.min(h) / 2.0);
-    if r <= 0.0 {
-        return vec![(0.0, 0.0), (w, 0.0), (w, h), (0.0, h), (0.0, 0.0)];
-    }
-    let n = ((r * std::f64::consts::FRAC_PI_2 / 0.3).ceil() as usize).clamp(4, 64);
-    let mut pts = Vec::new();
-    // Corners clockwise from top-right, each a quarter arc.
-    for (cx, cy, start) in [(w - r, r, -90.0f64), (w - r, h - r, 0.0), (r, h - r, 90.0), (r, r, 180.0)] {
-        for i in 0..=n {
-            let a = (start + 90.0 * i as f64 / n as f64).to_radians();
-            pts.push((cx + r * a.cos(), cy + r * a.sin()));
+    /// Replace the shape with a path in design coordinates (no rotation or
+    /// flipping left), for editing its points. Text loses its letters.
+    pub fn make_path(&mut self) {
+        if matches!(self.kind, Kind::Path { .. }) && self.rotation == 0.0 && !self.flip_x && !self.flip_y {
+            return;
         }
+        let filled = self.fill_hint();
+        let even_odd = self.fill_rule() == FillRule::EvenOdd;
+        let curves = self.curves();
+        let name = if matches!(self.kind, Kind::Path { .. }) { self.name.clone() } else { t!("object-path") };
+        let mut o = Object::path(curves, self.color);
+        if let Kind::Path { filled: f, even_odd: e, .. } = &mut o.kind {
+            *f = filled;
+            *e = even_odd;
+        }
+        o.name = name;
+        o.group = self.group;
+        *self = o;
     }
-    pts.push(pts[0]);
-    pts
-}
 
-fn ellipse(w: f64, h: f64) -> Vec<Pt> {
-    let (rx, ry) = (w / 2.0, h / 2.0);
-    let perimeter = std::f64::consts::PI * (3.0 * (rx + ry) - ((3.0 * rx + ry) * (rx + 3.0 * ry)).max(0.0).sqrt());
-    let n = ((perimeter / 0.4).ceil() as usize).clamp(24, 720);
-    (0..=n)
-        .map(|i| {
-            let a = std::f64::consts::TAU * i as f64 / n as f64;
-            (rx + rx * a.cos(), ry + ry * a.sin())
-        })
-        .collect()
-}
+    /// A path's curves in design coordinates (call `make_path` first).
+    pub fn path_curves(&self) -> Option<Vec<SubPath>> {
+        matches!(self.kind, Kind::Path { .. }).then(|| self.curves())
+    }
 
-fn regular_polygon(w: f64, h: f64, sides: u32) -> Vec<Pt> {
-    let n = sides.max(3);
-    (0..=n)
-        .map(|i| {
-            let a = -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * i as f64 / n as f64;
-            (w / 2.0 + w / 2.0 * a.cos(), h / 2.0 + h / 2.0 * a.sin())
-        })
-        .collect()
+    /// Set a path's curves from design coordinates; the box follows them.
+    pub fn set_path_curves(&mut self, curves: Vec<SubPath>) {
+        let Kind::Path { filled, even_odd, .. } = self.kind else { return };
+        let (subpaths, (x, y, w, h)) = normalise(curves);
+        (self.x, self.y, self.w, self.h) = (x, y, w, h);
+        (self.rotation, self.flip_x, self.flip_y) = (0.0, false, false);
+        self.kind = Kind::Path { subpaths, filled, even_odd };
+    }
 }
 
 fn points_bounds<'a>(pts: impl Iterator<Item = &'a Pt>) -> Option<Bounds> {
@@ -230,13 +336,13 @@ fn points_bounds<'a>(pts: impl Iterator<Item = &'a Pt>) -> Option<Bounds> {
     })
 }
 
-/// Scale polylines (mm) into 0..1 of their bounds; returns them with the
-/// bounds as (x, y, w, h). A zero width or height stays 0.
-fn normalise(polylines: Vec<Vec<Pt>>) -> (Vec<Vec<Pt>>, (f64, f64, f64, f64)) {
-    let ((x0, y0), (x1, y1)) = points_bounds(polylines.iter().flatten()).unwrap_or(((0.0, 0.0), (0.0, 0.0)));
+/// Scale curves (mm) into 0..1 of the bounds of the drawn curve; returns
+/// them with the bounds as (x, y, w, h). A zero width or height stays 0.
+fn normalise(curves: Vec<SubPath>) -> (Vec<SubPath>, (f64, f64, f64, f64)) {
+    let ((x0, y0), (x1, y1)) = bezier::bounds(&curves, FLATTEN_TOLERANCE_MM).unwrap_or(((0.0, 0.0), (0.0, 0.0)));
     let (w, h) = (x1 - x0, y1 - y0);
     let n = |v: f64, lo: f64, size: f64| if size > 0.0 { (v - lo) / size } else { 0.0 };
-    let out = polylines.into_iter().map(|pl| pl.into_iter().map(|(x, y)| (n(x, x0, w), n(y, y0, h))).collect()).collect();
+    let out = curves.iter().map(|s| s.map(&|(x, y)| (n(x, x0, w), n(y, y0, h)))).collect();
     (out, (x0, y0, w, h))
 }
 
@@ -399,14 +505,15 @@ impl Design {
 
     fn import_svg_data(&mut self, data: &[u8], name: &str, top_right: Pt) -> Result<Vec<usize>, String> {
         let shapes = svg_shapes(data)?;
-        let ((_, y0), (x1, _)) = points_bounds(shapes.iter().flat_map(|s| s.polylines.iter().flatten())).unwrap();
+        let all: Vec<SubPath> = shapes.iter().flat_map(|s| s.curves.iter().cloned()).collect();
+        let ((_, y0), (x1, _)) = bezier::bounds(&all, FLATTEN_TOLERANCE_MM).ok_or_else(|| t!("err-svg-empty"))?;
         let (dx, dy) = (top_right.0 - x1, top_right.1 - y0);
         let group = self.new_group();
         let first = self.objects.len();
         for s in shapes {
-            let moved = s.polylines.into_iter().map(|pl| pl.into_iter().map(|(x, y)| (x + dx, y + dy)).collect()).collect();
-            let (polylines, rect) = normalise(moved);
-            let mut o = Object::new(Kind::Path { polylines, filled: s.filled }, rect, s.color);
+            let moved = s.curves.iter().map(|c| c.map(&|(x, y)| (x + dx, y + dy))).collect();
+            let (subpaths, rect) = normalise(moved);
+            let mut o = Object::new(Kind::Path { subpaths, filled: s.filled, even_odd: s.even_odd }, rect, s.color);
             o.name = name.to_string();
             o.group = Some(group);
             self.objects.push(o);
@@ -446,12 +553,19 @@ impl Design {
 
     /// Copies of the selection, offset a little; returns their indices.
     pub fn duplicate(&mut self, sel: &[usize]) -> Vec<usize> {
+        let copies: Vec<Object> = sel.iter().map(|&i| self.objects[i].clone()).collect();
+        self.paste(&copies, (5.0, 5.0))
+    }
+
+    /// Add copies of `objects` moved by `offset`, in new groups of their
+    /// own; returns their indices.
+    pub fn paste(&mut self, objects: &[Object], offset: Pt) -> Vec<usize> {
         let mut groups = std::collections::HashMap::new();
         let first = self.objects.len();
-        for &i in sel {
-            let mut o = self.objects[i].clone();
-            o.x += 5.0;
-            o.y += 5.0;
+        for o in objects {
+            let mut o = o.clone();
+            o.x += offset.0;
+            o.y += offset.1;
             if let Some(g) = o.group {
                 let next = *groups.entry(g).or_insert_with(|| {
                     self.next_group += 1;
@@ -463,6 +577,36 @@ impl Design {
         }
         self.touch();
         (first..self.objects.len()).collect()
+    }
+
+    /// Move the selection to the top of the drawing order (drawn and picked
+    /// last) or to the bottom; returns its new indices.
+    pub fn reorder(&mut self, sel: &[usize], to_front: bool) -> Vec<usize> {
+        let mut picked = Vec::new();
+        let mut rest = Vec::new();
+        for (i, o) in std::mem::take(&mut self.objects).into_iter().enumerate() {
+            if sel.contains(&i) { picked.push(o) } else { rest.push(o) }
+        }
+        let n = picked.len();
+        let start = if to_front { rest.len() } else { 0 };
+        self.objects = if to_front { rest.into_iter().chain(picked).collect() } else { picked.into_iter().chain(rest).collect() };
+        self.revision += 1;
+        (start..start + n).collect()
+    }
+
+    /// Turn the selection by `deg` degrees (clockwise) around its centre.
+    pub fn rotate(&mut self, sel: &[usize], deg: f64) {
+        let Some(((x0, y0), (x1, y1))) = self.selection_bounds(sel) else { return };
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let (sin, cos) = deg.to_radians().sin_cos();
+        for &i in sel {
+            let o = &mut self.objects[i];
+            let (dx, dy) = (o.x + o.w / 2.0 - cx, o.y + o.h / 2.0 - cy);
+            o.x = cx + dx * cos - dy * sin - o.w / 2.0;
+            o.y = cy + dx * sin + dy * cos - o.h / 2.0;
+            o.rotation = (o.rotation + deg).rem_euclid(360.0);
+        }
+        self.touch();
     }
 
     pub fn remove(&mut self, sel: &[usize]) {
@@ -497,6 +641,11 @@ impl Design {
             obj.y = ty0 + (o.y - fy0) * sy;
             obj.w = (o.w * sx).max(if o.w > 0.0 { MIN_SIZE } else { 0.0 });
             obj.h = (o.h * sy).max(if o.h > 0.0 { MIN_SIZE } else { 0.0 });
+            if let (Kind::Text { scale, .. }, Kind::Text { scale: old, .. }) = (&mut obj.kind, &o.kind) {
+                // An empty text has no size to scale from: keep its letter size.
+                let k = |new: f64, was: f64| if was > 1e-9 { new / was } else { 1.0 };
+                *scale = (old.0 * k(obj.w, o.w), old.1 * k(obj.h, o.h));
+            }
         }
         self.revision += 1;
     }
@@ -510,17 +659,31 @@ impl Design {
         self.layer_paths(color).iter().map(|pl| pl.windows(2).map(|w| dist(w[0], w[1])).sum::<f64>()).sum()
     }
 
+    /// A layer's outlines for filling, mapped by `f` (design mm → µm), with
+    /// one fill shape per object (each with its own rule; shapes are united).
+    pub fn layer_fill(&self, color: [u8; 3], f: impl Fn(Pt) -> (i32, i32)) -> (Vec<Vec<(i32, i32)>>, Vec<FillShape>) {
+        let mut polys = Vec::new();
+        let mut shapes = Vec::new();
+        for o in self.objects.iter().filter(|o| o.color == color) {
+            let outline: Vec<Vec<(i32, i32)>> = o.outline().into_iter().map(|pl| pl.into_iter().map(&f).collect()).collect();
+            shapes.push(FillShape { len: outline.len(), rule: o.fill_rule() });
+            polys.extend(outline);
+        }
+        (polys, shapes)
+    }
+
     /// A layer's outlines in design µm, for filling.
-    pub fn layer_outlines_um(&self, color: [u8; 3]) -> Vec<Vec<(i32, i32)>> {
+    pub fn layer_fill_um(&self, color: [u8; 3]) -> (Vec<Vec<(i32, i32)>>, Vec<FillShape>) {
         let um = |v: f64| (v * 1000.0).round() as i32;
-        self.layer_paths(color).into_iter().map(|pl| pl.into_iter().map(|(x, y)| (um(x), um(y))).collect()).collect()
+        self.layer_fill(color, |(x, y)| (um(x), um(y)))
     }
 
     /// Engraving geometry that drives the time: total width of all scan
     /// lines (from first to last span, gaps included) in mm, and line count.
     pub fn engrave_stats(&self, color: [u8; 3], interval_mm: f32) -> (f64, usize) {
         let interval = (interval_mm * 1000.0).round().max(1.0) as i32;
-        let lines = ruida::fill::scan(&self.layer_outlines_um(color), interval);
+        let (polys, shapes) = self.layer_fill_um(color);
+        let lines = ruida::fill::scan_shapes(&polys, &shapes, interval);
         let extent: f64 = lines
             .iter()
             .map(|l| {
@@ -565,8 +728,8 @@ impl Design {
     /// `origin_right`: the machine's X axis counts from the right.
     ///
     /// Burn order: engraving first, then marking, then cutting (a part that
-    /// is already cut free can shift), and within a layer smaller shapes go
-    /// first so holes are cut before the outline around them.
+    /// is already cut free can shift); within a layer, holes before the
+    /// shape around them and otherwise the nearest path next (see `paths`).
     pub fn to_job(&self, material: Option<&Material>, origin_right: bool, anchor: Anchor) -> Result<Vec<JobLayer>, String> {
         let (ax, ay) = anchor.point(self.bounds().ok_or_else(|| t!("err-design-empty"))?);
         let um = |v: f64| (v * 1000.0).round() as i32;
@@ -590,9 +753,24 @@ impl Design {
             Operation::Mark => 1,
             Operation::Cut => 2,
         });
+        // Each layer's paths are ordered from where the previous one ended
+        // (the head, for the first), innermost shapes first.
+        let mut pos = (0, 0);
         Ok(layers
             .into_iter()
-            .map(|(l, op, s)| JobLayer {
+            .map(|(l, op, s)| {
+                // Engraving is filled line by line: the outline order doesn't matter.
+                let (paths, shapes) = if op == Operation::Engrave {
+                    self.layer_fill(l.color, to_ctrl)
+                } else {
+                    let paths: Vec<Vec<(i32, i32)>> = self.layer_paths(l.color).into_iter().map(|pl| pl.into_iter().map(to_ctrl).collect()).collect();
+                    let ordered = paths::order(paths, pos);
+                    if let Some(&last) = ordered.last().and_then(|p| p.last()) {
+                        pos = last;
+                    }
+                    (ordered, Vec::new())
+                };
+                JobLayer {
                 kind: match op {
                     Operation::Engrave => LayerKind::Engrave { interval: (s.line_interval_mm * 1000.0).round() as i32 },
                     _ => LayerKind::Cut,
@@ -603,13 +781,39 @@ impl Design {
                 max_power: s.max_power,
                 passes: s.passes,
                 air_assist: s.air_assist,
-                paths: {
-                    let mut paths = self.layer_paths(l.color);
-                    paths.sort_by(|a, b| area(a).total_cmp(&area(b)));
-                    paths.into_iter().map(|pl| pl.into_iter().map(to_ctrl).collect()).collect()
-                },
-            })
+                paths,
+                shapes,
+            }})
             .collect())
+    }
+}
+
+impl Design {
+    /// A job that moves the head once around the box of the whole design
+    /// with the laser off ("Frame"), so you can check where it will go.
+    pub fn frame_job(&self, origin_right: bool, anchor: Anchor) -> Result<Vec<JobLayer>, String> {
+        let b @ ((x0, y0), (x1, y1)) = self.bounds().ok_or_else(|| t!("err-design-empty"))?;
+        let (ax, ay) = anchor.point(b);
+        let um = |v: f64| (v * 1000.0).round() as i32;
+        let to_ctrl = |(x, y): Pt| (um(if origin_right { ax - x } else { x - ax }), um(y - ay));
+        let rect = vec![to_ctrl((x0, y0)), to_ctrl((x1, y0)), to_ctrl((x1, y1)), to_ctrl((x0, y1)), to_ctrl((x0, y0))];
+        Ok(vec![JobLayer {
+            kind: LayerKind::Cut,
+            color: [0, 0, 0],
+            speed: FRAME_SPEED,
+            min_power: 0.0,
+            max_power: 0.0,
+            passes: 1,
+            air_assist: false,
+            // Start at the corner nearest the head.
+            paths: paths::order(vec![rect], (0, 0)),
+            shapes: Vec::new(),
+        }])
+    }
+
+    /// Expected time of [`Self::frame_job`] in seconds.
+    pub fn frame_time_s(&self) -> f64 {
+        self.bounds().map(|((x0, y0), (x1, y1))| 2.0 * ((x1 - x0) + (y1 - y0)) / FRAME_SPEED + 1.0).unwrap_or(0.0)
     }
 }
 
@@ -658,11 +862,6 @@ impl History {
     }
 }
 
-/// Bounding-box area, used to cut inner shapes before outer ones.
-fn area(pl: &[Pt]) -> f64 {
-    points_bounds(pl.iter()).map(|((x0, y0), (x1, y1))| (x1 - x0) * (y1 - y0)).unwrap_or(0.0)
-}
-
 fn dist(a: Pt, b: Pt) -> f64 {
     (b.0 - a.0).hypot(b.1 - a.1)
 }
@@ -673,45 +872,21 @@ struct Shape {
     color: [u8; 3],
     /// Any path of this colour has a fill (suggests engraving).
     filled: bool,
-    polylines: Vec<Vec<Pt>>,
-}
-
-/// usvg options with the system fonts, loaded once.
-fn svg_options() -> usvg::Options<'static> {
-    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    let mut opt = usvg::Options::default();
-    opt.fontdb = FONTS
-        .get_or_init(|| {
-            let mut db = usvg::fontdb::Database::new();
-            db.load_system_fonts();
-            Arc::new(db)
-        })
-        .clone();
-    opt
+    /// A filled path asked for the even-odd rule.
+    even_odd: bool,
+    /// In mm.
+    curves: Vec<SubPath>,
 }
 
 fn svg_shapes(data: &[u8]) -> Result<Vec<Shape>, String> {
-    let tree = usvg::Tree::from_data(data, &svg_options()).map_err(|e| t!("err-svg-unreadable", error = e.to_string()))?;
+    let tree = usvg::Tree::from_data(data, &fonts::svg_options()).map_err(|e| t!("err-svg-unreadable", error = e.to_string()))?;
     let mut shapes: Vec<Shape> = Vec::new();
     collect(tree.root(), &mut shapes);
-    shapes.retain(|s| !s.polylines.is_empty());
+    shapes.retain(|s| !s.curves.is_empty());
     if shapes.is_empty() {
         return Err(t!("err-svg-empty"));
     }
     Ok(shapes)
-}
-
-fn text_outlines(text: &str, font: Font, bold: bool) -> Result<Vec<Vec<Pt>>, String> {
-    let placeholder = t!("default-text");
-    let text = if text.trim().is_empty() { placeholder.as_str() } else { text };
-    let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="200"><text x="10" y="120" font-family="{}" font-weight="{}" font-size="100">{escaped}</text></svg>"#,
-        font.family(),
-        if bold { "bold" } else { "normal" }
-    );
-    let shapes = svg_shapes(svg.as_bytes()).map_err(|_| t!("err-no-font"))?;
-    Ok(shapes.into_iter().flat_map(|s| s.polylines).collect())
 }
 
 fn collect(group: &usvg::Group, shapes: &mut Vec<Shape>) {
@@ -722,13 +897,16 @@ fn collect(group: &usvg::Group, shapes: &mut Vec<Shape>) {
             usvg::Node::Path(p) => {
                 let color = path_color(p);
                 let filled = p.fill().is_some();
-                let polylines = flatten(p.data(), p.abs_transform());
+                let even_odd = p.fill().is_some_and(|f| f.rule() == usvg::FillRule::EvenOdd);
+                let ts = p.abs_transform().post_scale(PX_TO_MM as f32, PX_TO_MM as f32);
+                let curves = bezier::from_usvg(p.data(), ts);
                 match shapes.iter_mut().find(|s| s.color == color) {
                     Some(s) => {
-                        s.polylines.extend(polylines);
+                        s.curves.extend(curves);
                         s.filled |= filled;
+                        s.even_odd |= even_odd;
                     }
-                    None => shapes.push(Shape { color, filled, polylines }),
+                    None => shapes.push(Shape { color, filled, even_odd, curves }),
                 }
             }
             usvg::Node::Image(_) => {}
@@ -742,69 +920,6 @@ fn path_color(p: &usvg::Path) -> [u8; 3] {
     match paint {
         Some(usvg::Paint::Color(c)) => [c.red, c.green, c.blue],
         _ => [0, 0, 0],
-    }
-}
-
-fn flatten(path: &usvg::tiny_skia_path::Path, t: usvg::Transform) -> Vec<Vec<Pt>> {
-    use usvg::tiny_skia_path::PathSegment;
-    let map = |p: usvg::tiny_skia_path::Point| {
-        let mut p = p;
-        t.map_point(&mut p);
-        (p.x as f64 * PX_TO_MM, p.y as f64 * PX_TO_MM)
-    };
-    let mut out: Vec<Vec<Pt>> = Vec::new();
-    let mut current: Vec<Pt> = Vec::new();
-    let mut start = (0.0, 0.0);
-    let finish = |current: &mut Vec<Pt>, out: &mut Vec<Vec<Pt>>| {
-        if current.len() >= 2 {
-            out.push(std::mem::take(current));
-        } else {
-            current.clear();
-        }
-    };
-    for seg in path.segments() {
-        match seg {
-            PathSegment::MoveTo(p) => {
-                finish(&mut current, &mut out);
-                start = map(p);
-                current.push(start);
-            }
-            PathSegment::LineTo(p) => current.push(map(p)),
-            PathSegment::QuadTo(c, p) => {
-                let p0 = *current.last().unwrap_or(&start);
-                let (c, p) = (map(c), map(p));
-                subdivide(&mut current, p0, |t| {
-                    let u = 1.0 - t;
-                    (u * u * p0.0 + 2.0 * u * t * c.0 + t * t * p.0, u * u * p0.1 + 2.0 * u * t * c.1 + t * t * p.1)
-                }, dist(p0, c) + dist(c, p));
-            }
-            PathSegment::CubicTo(c1, c2, p) => {
-                let p0 = *current.last().unwrap_or(&start);
-                let (c1, c2, p) = (map(c1), map(c2), map(p));
-                subdivide(&mut current, p0, |t| {
-                    let u = 1.0 - t;
-                    let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
-                    (a * p0.0 + b * c1.0 + c * c2.0 + d * p.0, a * p0.1 + b * c1.1 + c * c2.1 + d * p.1)
-                }, dist(p0, c1) + dist(c1, c2) + dist(c2, p));
-            }
-            PathSegment::Close => {
-                if current.last() != Some(&start) {
-                    current.push(start);
-                }
-                finish(&mut current, &mut out);
-            }
-        }
-    }
-    finish(&mut current, &mut out);
-    out
-}
-
-/// Append points along a curve; the segment count grows with the control
-/// polygon length so flattening error stays around the tolerance.
-fn subdivide(out: &mut Vec<Pt>, _p0: Pt, curve: impl Fn(f64) -> Pt, control_len: f64) {
-    let n = ((control_len / FLATTEN_TOLERANCE_MM).sqrt().ceil() as usize).clamp(1, 500);
-    for i in 1..=n {
-        out.push(curve(i as f64 / n as f64));
     }
 }
 
@@ -874,10 +989,79 @@ mod tests {
 
     #[test]
     fn text_renders_to_outlines() {
-        let t = Object::text("FOKUS", Font::Sans, true, (0.0, 0.0), 10.0, [0, 0, 0]).unwrap();
-        assert!(close(t.h, 10.0));
+        let style = TextStyle { bold: true, ..TextStyle::default() };
+        let t = Object::text("FOKUS", style, (0.0, 20.0), 10.0, [0, 0, 0]).unwrap();
+        // Capitals are about 0.73 em high in Inter, sitting on the baseline.
+        assert!(t.h > 6.5 && t.h < 8.0, "{}", t.h);
+        // Round letters (O, S) dip slightly below the baseline.
+        assert!((t.y + t.h - 20.0).abs() < 0.2, "{}", t.y + t.h);
         assert!(t.w > 25.0 && t.w < 60.0, "{}", t.w);
         assert!(t.outline().len() >= 5, "at least one outline per letter");
+    }
+
+    #[test]
+    fn editing_text_keeps_its_start_and_size() {
+        let mut t = Object::text("Hi", TextStyle::default(), (10.0, 20.0), 10.0, [0, 0, 0]).unwrap();
+        t.rotation = 30.0;
+        let start = t.to_world((-match t.kind { Kind::Text { ink, scale, .. } => ink.x0 * scale.0, _ => 0.0 }, 0.0));
+        t.set_text("Hi there", TextStyle::default()).unwrap();
+        let after = t.to_world((-match t.kind { Kind::Text { ink, scale, .. } => ink.x0 * scale.0, _ => 0.0 }, 0.0));
+        assert!(close(start.0, after.0) && close(start.1, after.1), "{start:?} {after:?}");
+        assert!(t.w > 30.0);
+        t.set_text("", TextStyle::default()).unwrap();
+        assert_eq!(t.outline().len(), 0);
+        t.set_text("Hi", TextStyle::default()).unwrap();
+        assert!(t.w > 5.0, "size survives empty text");
+    }
+
+    #[test]
+    fn resizing_empty_text_keeps_its_letter_size() {
+        let mut d = Design::default();
+        d.add(Object::text("", TextStyle::default(), (10.0, 20.0), 12.0, [0, 0, 0]).unwrap());
+        let o = d.objects[0].clone();
+        let from = o.bounds();
+        d.resize(&[(0, o)], from, (from.0, (from.0.0 + 0.1, from.0.1 + 0.1)));
+        d.objects[0].set_text("Hi", TextStyle::default()).unwrap();
+        assert!(d.objects[0].h > 7.0, "{}", d.objects[0].h);
+    }
+
+    #[test]
+    fn overlapping_letter_parts_engrave_solid() {
+        // Inter draws the bar of "t" over its stem: no gap where they cross.
+        let mut d = Design::default();
+        d.add(Object::text("t", TextStyle::default(), (0.0, 20.0), 20.0, [255, 0, 0]).unwrap());
+        let (polys, shapes) = d.layer_fill_um([255, 0, 0]);
+        let ((x0, y0), (x1, y1)) = d.objects[0].bounds();
+        // Across the crossbar, a little above the middle of the letter.
+        let mut found_bar = false;
+        for k in 1..40 {
+            let y = (y0 + (y1 - y0) * k as f64 / 40.0) * 1000.0;
+            let spans = ruida::fill::spans_shapes(&polys, &shapes, y);
+            if spans.len() == 1 && (spans[0].1 - spans[0].0) as f64 > (x1 - x0) * 1000.0 * 0.8 {
+                found_bar = true;
+            }
+            let even_odd = ruida::fill::spans_at(&polys, y);
+            assert!(spans.len() <= even_odd.len().max(1));
+        }
+        assert!(found_bar, "the crossbar is one solid span");
+    }
+
+    #[test]
+    fn shapes_become_editable_paths() {
+        let mut r = Object::new(Kind::Rect { radius: 0.0 }, (10.0, 10.0, 20.0, 10.0), [0, 0, 0]);
+        r.rotation = 90.0;
+        let before = r.bounds();
+        r.make_path();
+        assert!(matches!(r.kind, Kind::Path { .. }));
+        assert_eq!(r.rotation, 0.0);
+        let after = r.bounds();
+        assert!(close(before.0.0, after.0.0) && close(before.1.1, after.1.1));
+        let mut curves = r.path_curves().unwrap();
+        for n in &mut curves[0].nodes {
+            n.p.0 -= 5.0;
+        }
+        r.set_path_curves(curves);
+        assert!(close(r.bounds().0.0, before.0.0 - 5.0));
     }
 
     #[test]
@@ -896,6 +1080,20 @@ mod tests {
         assert!(history.undo(&mut d));
         assert!(close(d.bounds().unwrap().1.0 - d.bounds().unwrap().0.0, 50.0));
         assert!(history.redo(&mut d));
+    }
+
+    #[test]
+    fn reorder_and_rotate() {
+        let mut d = design();
+        let n = d.objects.len();
+        let moved = d.reorder(&[0], true);
+        assert_eq!(moved, vec![n - 1]);
+        let back = d.reorder(&[n - 1], false);
+        assert_eq!(back, vec![0]);
+        let before = d.selection_bounds(&[0]).unwrap();
+        d.rotate(&[0], 90.0);
+        let after = d.selection_bounds(&[0]).unwrap();
+        assert!(close(after.1.0 - after.0.0, before.1.1 - before.0.1));
     }
 
     #[test]
@@ -971,6 +1169,23 @@ mod tests {
             d.layer_time_s(l.color, op, &s)
         }).sum();
         assert!((t - 42.0).abs() < 4.0, "estimate {t:.1} s");
+    }
+
+    #[test]
+    fn frame_traces_the_design_box_with_the_laser_off() {
+        let d = design();
+        let frame = d.frame_job(true, Anchor::TOP_RIGHT).unwrap();
+        assert_eq!(frame.len(), 1);
+        assert_eq!((frame[0].min_power, frame[0].max_power, frame[0].air_assist), (0.0, 0.0, false));
+        let pts = &frame[0].paths[0];
+        assert_eq!(pts.len(), 5);
+        assert_eq!(pts.first(), pts.last());
+        assert_eq!(pts[0], (0, 0), "starts at the head (the top-right corner)");
+        let job = d.to_job(Some(&plywood()), true, Anchor::TOP_RIGHT).unwrap();
+        let bounds = |ps: &mut dyn Iterator<Item = (i32, i32)>| ps.fold((i32::MAX, i32::MAX, i32::MIN, i32::MIN), |b, p| (b.0.min(p.0), b.1.min(p.1), b.2.max(p.0), b.3.max(p.1)));
+        let frame_box = bounds(&mut pts.iter().copied());
+        let job_box = bounds(&mut job.iter().flat_map(|l| l.paths.iter().flatten().copied()));
+        assert_eq!(frame_box, job_box, "the frame is exactly the job's box");
     }
 
     #[test]

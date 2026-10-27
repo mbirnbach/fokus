@@ -3,11 +3,14 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use eframe::egui::{self, Color32, CornerRadius, Stroke, Theme, ThemePreference};
+use std::sync::Arc;
+
+use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, RichText, Stroke, TextStyle, Theme, ThemePreference};
 
 use crate::t;
 
 pub struct Palette {
+    pub dark: bool,
     pub bg: Color32,
     pub panel: Color32,
     pub card: Color32,
@@ -15,6 +18,7 @@ pub struct Palette {
     pub text: Color32,
     pub muted: Color32,
     pub accent: Color32,
+    pub accent_hover: Color32,
     /// Text drawn on an accent-coloured button.
     pub on_accent: Color32,
     pub ok: Color32,
@@ -28,6 +32,7 @@ pub struct Palette {
 }
 
 pub const LIGHT: Palette = Palette {
+    dark: false,
     bg: Color32::from_rgb(0xEE, 0xF0, 0xF3),
     panel: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     card: Color32::from_rgb(0xF6, 0xF7, 0xF9),
@@ -35,6 +40,7 @@ pub const LIGHT: Palette = Palette {
     text: Color32::from_rgb(0x1B, 0x21, 0x2C),
     muted: Color32::from_rgb(0x6A, 0x72, 0x80),
     accent: Color32::from_rgb(0xE8, 0x57, 0x2A),
+    accent_hover: Color32::from_rgb(0xF0, 0x66, 0x3A),
     on_accent: Color32::WHITE,
     ok: Color32::from_rgb(0x1F, 0x9D, 0x5B),
     warn: Color32::from_rgb(0xC2, 0x7A, 0x0A),
@@ -47,6 +53,7 @@ pub const LIGHT: Palette = Palette {
 };
 
 pub const DARK: Palette = Palette {
+    dark: true,
     bg: Color32::from_rgb(0x12, 0x14, 0x18),
     panel: Color32::from_rgb(0x1A, 0x1D, 0x23),
     card: Color32::from_rgb(0x23, 0x27, 0x2F),
@@ -54,6 +61,7 @@ pub const DARK: Palette = Palette {
     text: Color32::from_rgb(0xE6, 0xE8, 0xEC),
     muted: Color32::from_rgb(0x8B, 0x93, 0xA1),
     accent: Color32::from_rgb(0xFF, 0x74, 0x45),
+    accent_hover: Color32::from_rgb(0xFF, 0x86, 0x5C),
     on_accent: Color32::from_rgb(0x1A, 0x10, 0x0C),
     ok: Color32::from_rgb(0x3D, 0xD6, 0x8C),
     warn: Color32::from_rgb(0xFF, 0xC1, 0x4D),
@@ -150,10 +158,70 @@ pub fn color_name([r, g, b]: [u8; 3]) -> String {
     }
 }
 
+/// The UI font (Inter, SIL Open Font Licence, see `fonts/LICENSE.inter`)
+/// in three weights; egui's own fonts stay as fallback for other scripts.
+pub const INTER_REGULAR: &[u8] = include_bytes!("../fonts/inter-400.ttf");
+const INTER_MEDIUM: &[u8] = include_bytes!("../fonts/inter-500.ttf");
+pub const INTER_SEMIBOLD: &[u8] = include_bytes!("../fonts/inter-600.ttf");
+
+fn medium_family() -> FontFamily {
+    FontFamily::Name("medium".into())
+}
+
+fn semibold_family() -> FontFamily {
+    FontFamily::Name("semibold".into())
+}
+
+pub fn medium(size: f32) -> FontId {
+    FontId::new(size, medium_family())
+}
+
+pub fn semibold(size: f32) -> FontId {
+    FontId::new(size, semibold_family())
+}
+
+/// Weights for labels, instead of egui's `strong()` (which only changes colour).
+pub trait Weight {
+    fn medium(self) -> RichText;
+    fn semibold(self) -> RichText;
+}
+
+impl Weight for RichText {
+    fn medium(self) -> RichText {
+        self.family(medium_family())
+    }
+    fn semibold(self) -> RichText {
+        self.family(semibold_family())
+    }
+}
+
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    for (name, data) in [("inter-400", INTER_REGULAR), ("inter-500", INTER_MEDIUM), ("inter-600", INTER_SEMIBOLD)] {
+        fonts.font_data.insert(name.into(), Arc::new(FontData::from_static(data)));
+    }
+    let chain = |first: &str| std::iter::once(first.to_string()).chain(fallback.iter().cloned()).collect::<Vec<_>>();
+    fonts.families.insert(FontFamily::Proportional, chain("inter-400"));
+    fonts.families.insert(medium_family(), chain("inter-500"));
+    fonts.families.insert(semibold_family(), chain("inter-600"));
+    ctx.set_fonts(fonts);
+}
+
 fn style(style: &mut egui::Style, pal: &Palette) {
+    style.text_styles = [
+        (TextStyle::Small, FontId::proportional(11.0)),
+        (TextStyle::Body, FontId::proportional(13.0)),
+        (TextStyle::Button, medium(13.0)),
+        (TextStyle::Heading, semibold(18.0)),
+        (TextStyle::Monospace, FontId::monospace(12.0)),
+    ]
+    .into();
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 6.0);
     style.spacing.interact_size.y = 30.0;
+    style.spacing.menu_margin = egui::Margin::same(6);
+    style.interaction.selectable_labels = false;
 
     let v = &mut style.visuals;
     v.panel_fill = pal.panel;
@@ -168,6 +236,8 @@ fn style(style: &mut egui::Style, pal: &Palette) {
 
     let radius = CornerRadius::same(8);
     v.window_corner_radius = CornerRadius::same(12);
+    v.window_shadow = egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(if pal.dark { 110 } else { 38 }) };
+    v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(if pal.dark { 100 } else { 30 }) };
     v.menu_corner_radius = radius;
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = radius;
@@ -193,6 +263,7 @@ pub fn apply(ctx: &egui::Context) {
         _ => ThemePreference::System,
     };
     ctx.set_theme(pref);
+    install_fonts(ctx);
     ctx.style_mut_of(Theme::Light, |s| style(s, &LIGHT));
     ctx.style_mut_of(Theme::Dark, |s| style(s, &DARK));
 }

@@ -176,6 +176,7 @@ fn engrave_layer_encoding_matches_lightburn() {
         passes: 1,
         air_assist: true,
         paths: vec![vec![(25_000, 0), (0, 0), (0, 25_000), (25_000, 25_000), (25_000, 0)]],
+        shapes: Vec::new(),
     };
     let text = JobLayer {
         kind: LayerKind::Engrave { interval: 100 },
@@ -186,6 +187,7 @@ fn engrave_layer_encoding_matches_lightburn() {
         passes: 1,
         air_assist: true,
         paths: glyph_outlines(),
+        shapes: Vec::new(),
     };
     let ours = write_plain(&[square, text]).unwrap();
 
