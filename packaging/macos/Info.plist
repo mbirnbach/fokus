@@ -6,6 +6,7 @@
   <key>CFBundleDisplayName</key><string>Fokus</string>
   <key>CFBundleIdentifier</key><string>io.github.fokusapp.fokus</string>
   <key>CFBundleExecutable</key><string>fokus</string>
+  <key>CFBundleIconFile</key><string>fokus</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>__VERSION__</string>
   <key>CFBundleVersion</key><string>__VERSION__</string>

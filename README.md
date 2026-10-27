@@ -18,13 +18,13 @@ pick the file for your computer:
 | Computer | File |
 |---|---|
 | Windows | `fokus-…-x86_64-pc-windows-msvc.zip` |
-| Mac with Apple chip (M1 or newer) | `fokus-…-aarch64-apple-darwin.zip` |
-| Mac with Intel chip | `fokus-…-x86_64-apple-darwin.zip` |
+| Mac with Apple chip (M1 or newer) | `fokus-…-aarch64-apple-darwin.dmg` |
+| Mac with Intel chip | `fokus-…-x86_64-apple-darwin.dmg` |
 | Linux | `fokus-…-x86_64-unknown-linux-gnu.tar.gz` |
 
 - **Windows:** unzip and start `fokus.exe`. If Windows warns that it
   protected your PC, click *More info → Run anyway*.
-- **macOS:** unzip and move `Fokus.app` to *Applications*. The first time,
+- **macOS:** open the `.dmg` and drag *Fokus* into *Applications*. The first time,
   right-click it and choose *Open*, then confirm; after that it opens
   normally.
 - **Linux:** unpack and start `fokus`. To use the USB connection you may need

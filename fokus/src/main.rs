@@ -43,7 +43,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Fokus")
             .with_inner_size([1400.0, 860.0])
-            .with_min_inner_size([1040.0, 600.0]),
+            .with_min_inner_size([1040.0, 600.0])
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../../assets/brand/icon/fokus-256.png")).expect("icon is a PNG")),
         ..Default::default()
     };
     eframe::run_native(

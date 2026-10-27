@@ -24,16 +24,23 @@ case "$target" in
     ;;
   *apple-darwin*)
     app="$out/$name/Fokus.app"
-    mkdir -p "$app/Contents/MacOS"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp "$bin_dir/fokus" "$app/Contents/MacOS/fokus"
+    cp "$root/assets/brand/icon/fokus.icns" "$app/Contents/Resources/"
     sed "s/__VERSION__/$version/g" "$root/packaging/macos/Info.plist" > "$app/Contents/Info.plist"
-    cp "$root/README.md" "$out/$name/"
     # Not signed or notarised: macOS asks once (right-click → Open).
-    (cd "$out" && ditto -c -k --norsrc --noextattr --keepParent "$name" "$name.zip")
+    # A disk image with the app, an Applications link and the background that says what to do.
+    # dmgbuild writes the Finder layout itself, so this needs no GUI session.
+    venv="$root/target/dmgbuild-venv"
+    [ -x "$venv/bin/dmgbuild" ] || { python3 -m venv "$venv" && "$venv/bin/pip" install -q dmgbuild==1.6.7; }
+    "$venv/bin/dmgbuild" -s "$root/packaging/macos/dmg-settings.py" \
+      -D app="$app" -D background="$root/assets/brand/dmg/background.tiff" \
+      "Fokus $version" "$out/$name.dmg" >/dev/null
     ;;
   *linux*)
     mkdir -p "$out/$name"
     cp "$bin_dir/fokus" "$root/README.md" "$root/packaging/linux/fokus.desktop" "$out/$name/"
+    cp "$root/assets/brand/icon/fokus-256.png" "$out/$name/fokus.png"
     tar -C "$out" -czf "$out/$name.tar.gz" "$name"
     ;;
   *)

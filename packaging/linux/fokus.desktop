@@ -6,6 +6,7 @@ GenericName[de]=Lasercutter-Software
 Comment=Design and run jobs on Ruida CO2 laser cutters
 Comment[de]=Designs erstellen und Aufträge auf Ruida-CO2-Lasern ausführen
 Exec=fokus %f
+Icon=fokus
 Terminal=false
 Categories=Graphics;Engineering;
 MimeType=application/x-fokus-project;image/svg+xml;
