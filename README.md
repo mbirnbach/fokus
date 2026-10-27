@@ -55,5 +55,5 @@ the first start needs right-click → Open.
 ## Status
 
 Tested on the real machine: job files for cutting and engraving, sending over
-USB, start points, pause / resume. Not yet: Stop on the real machine, photo
-engraving, Windows and Linux builds on real hardware.
+USB, start points, pause / resume, framing, stop. Not yet: photo engraving,
+Windows and Linux builds on real hardware.
