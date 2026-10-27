@@ -1145,7 +1145,7 @@ impl Canvas {
                 }
             }
             let label = format!("{:.1} × {:.1} mm", x1 - x0, y1 - y0);
-            badge(&painter, r.center_bottom() + Vec2::new(0.0, 16.0), &label, pal.accent, pal.on_accent);
+            badge(&painter, r.center_bottom() + Vec2::new(0.0, 16.0), &label, pal.accent_fill, pal.on_accent);
         }
 
         // In-progress gestures.
@@ -1167,12 +1167,12 @@ impl Canvas {
                         painter.add(Shape::line(pl.into_iter().map(to_screen).collect(), Stroke::new(1.5, pal.accent)));
                     }
                     let ((x0, y0), (x1, y1)) = b;
-                    badge(&painter, to_screen((x1, y1)) + Vec2::new(40.0, 16.0), &format!("{:.1} × {:.1} mm", x1 - x0, y1 - y0), pal.accent, pal.on_accent);
+                    badge(&painter, to_screen((x1, y1)) + Vec2::new(40.0, 16.0), &format!("{:.1} × {:.1} mm", x1 - x0, y1 - y0), pal.accent_fill, pal.on_accent);
                 }
             }
             Drag::Rotate { angle, .. } => {
                 if let Some(p) = pointer {
-                    badge(&painter, p + Vec2::new(28.0, 22.0), &format!("{angle:.0}°"), pal.accent, pal.on_accent);
+                    badge(&painter, p + Vec2::new(28.0, 22.0), &format!("{angle:.0}°"), pal.accent_fill, pal.on_accent);
                 }
             }
             _ => {}

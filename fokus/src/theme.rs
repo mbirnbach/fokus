@@ -9,6 +9,12 @@ use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontF
 
 use crate::t;
 
+/// Brand colours: Graphite, Cool Gray, Off White and the Cyan accent.
+pub const GRAPHITE: Color32 = Color32::from_rgb(0x0B, 0x0F, 0x14);
+pub const COOL_GRAY: Color32 = Color32::from_rgb(0x1F, 0x29, 0x37);
+pub const OFF_WHITE: Color32 = Color32::from_rgb(0xF4, 0xF6, 0xF8);
+pub const CYAN: Color32 = Color32::from_rgb(0x00, 0xD7, 0xFF);
+
 pub struct Palette {
     pub dark: bool,
     pub bg: Color32,
@@ -17,9 +23,13 @@ pub struct Palette {
     pub border: Color32,
     pub text: Color32,
     pub muted: Color32,
+    /// The accent for text, icons and lines. Pure cyan is too light to read
+    /// on white, so light mode uses a deeper shade.
     pub accent: Color32,
-    pub accent_hover: Color32,
-    /// Text drawn on an accent-coloured button.
+    /// The accent for areas: primary buttons, switches, badges.
+    pub accent_fill: Color32,
+    pub accent_fill_hover: Color32,
+    /// Text and icons drawn on `accent_fill`.
     pub on_accent: Color32,
     pub ok: Color32,
     pub warn: Color32,
@@ -33,44 +43,46 @@ pub struct Palette {
 
 pub const LIGHT: Palette = Palette {
     dark: false,
-    bg: Color32::from_rgb(0xEE, 0xF0, 0xF3),
-    panel: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-    card: Color32::from_rgb(0xF6, 0xF7, 0xF9),
-    border: Color32::from_rgb(0xE1, 0xE4, 0xE9),
-    text: Color32::from_rgb(0x1B, 0x21, 0x2C),
-    muted: Color32::from_rgb(0x6A, 0x72, 0x80),
-    accent: Color32::from_rgb(0xE8, 0x57, 0x2A),
-    accent_hover: Color32::from_rgb(0xF0, 0x66, 0x3A),
-    on_accent: Color32::WHITE,
+    bg: Color32::from_rgb(0xEA, 0xED, 0xF1),
+    panel: Color32::WHITE,
+    card: OFF_WHITE,
+    border: Color32::from_rgb(0xDC, 0xE1, 0xE7),
+    text: GRAPHITE,
+    muted: Color32::from_rgb(0x5E, 0x6A, 0x7A),
+    accent: Color32::from_rgb(0x00, 0x86, 0xA6),
+    accent_fill: CYAN,
+    accent_fill_hover: Color32::from_rgb(0x4D, 0xE3, 0xFF),
+    on_accent: GRAPHITE,
     ok: Color32::from_rgb(0x1F, 0x9D, 0x5B),
     warn: Color32::from_rgb(0xC2, 0x7A, 0x0A),
     err: Color32::from_rgb(0xD6, 0x33, 0x33),
-    bed: Color32::from_rgb(0xFB, 0xFB, 0xFC),
-    grid_fine: Color32::from_rgb(0xEE, 0xF0, 0xF3),
-    grid_major: Color32::from_rgb(0xD7, 0xDB, 0xE1),
-    hover: Color32::from_rgb(0xEC, 0xEE, 0xF2),
-    pressed: Color32::from_rgb(0xE2, 0xE5, 0xEA),
+    bed: Color32::from_rgb(0xFB, 0xFC, 0xFD),
+    grid_fine: Color32::from_rgb(0xEE, 0xF1, 0xF4),
+    grid_major: Color32::from_rgb(0xD5, 0xDB, 0xE2),
+    hover: Color32::from_rgb(0xEA, 0xEE, 0xF2),
+    pressed: Color32::from_rgb(0xDF, 0xE4, 0xEA),
 };
 
 pub const DARK: Palette = Palette {
     dark: true,
-    bg: Color32::from_rgb(0x12, 0x14, 0x18),
-    panel: Color32::from_rgb(0x1A, 0x1D, 0x23),
-    card: Color32::from_rgb(0x23, 0x27, 0x2F),
-    border: Color32::from_rgb(0x2E, 0x33, 0x3D),
-    text: Color32::from_rgb(0xE6, 0xE8, 0xEC),
-    muted: Color32::from_rgb(0x8B, 0x93, 0xA1),
-    accent: Color32::from_rgb(0xFF, 0x74, 0x45),
-    accent_hover: Color32::from_rgb(0xFF, 0x86, 0x5C),
-    on_accent: Color32::from_rgb(0x1A, 0x10, 0x0C),
+    bg: GRAPHITE,
+    panel: Color32::from_rgb(0x12, 0x18, 0x21),
+    card: COOL_GRAY,
+    border: Color32::from_rgb(0x2B, 0x36, 0x46),
+    text: OFF_WHITE,
+    muted: Color32::from_rgb(0x8B, 0x97, 0xA8),
+    accent: CYAN,
+    accent_fill: CYAN,
+    accent_fill_hover: Color32::from_rgb(0x5C, 0xE6, 0xFF),
+    on_accent: GRAPHITE,
     ok: Color32::from_rgb(0x3D, 0xD6, 0x8C),
     warn: Color32::from_rgb(0xFF, 0xC1, 0x4D),
     err: Color32::from_rgb(0xFF, 0x5C, 0x5C),
-    bed: Color32::from_rgb(0x1E, 0x22, 0x29),
-    grid_fine: Color32::from_rgb(0x26, 0x2B, 0x33),
-    grid_major: Color32::from_rgb(0x34, 0x3A, 0x45),
-    hover: Color32::from_rgb(0x2C, 0x31, 0x3B),
-    pressed: Color32::from_rgb(0x33, 0x39, 0x44),
+    bed: Color32::from_rgb(0x12, 0x19, 0x23),
+    grid_fine: Color32::from_rgb(0x19, 0x22, 0x2E),
+    grid_major: Color32::from_rgb(0x26, 0x32, 0x42),
+    hover: Color32::from_rgb(0x26, 0x32, 0x43),
+    pressed: Color32::from_rgb(0x2F, 0x3C, 0x50),
 };
 
 static DARK_MODE: AtomicBool = AtomicBool::new(false);

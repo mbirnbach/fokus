@@ -2280,7 +2280,7 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
         response.mark_changed();
     }
     let t = ui.ctx().animate_bool_responsive(response.id, *on);
-    let fill = if *on { pal.accent } else { pal.border };
+    let fill = if *on { pal.accent_fill } else { pal.border };
     ui.painter().rect_filled(rect, 10.0, fill);
     let x = egui::lerp((rect.left() + 10.0)..=(rect.right() - 10.0), t);
     ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, Color32::WHITE);

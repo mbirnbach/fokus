@@ -113,7 +113,7 @@ impl Btn {
         let hovered = response.hovered() && enabled;
         let pressed = response.is_pointer_button_down_on() && enabled;
         let (fill, stroke) = match self.style {
-            Style::Primary => (if pressed { pal.accent.gamma_multiply(0.85) } else if hovered { pal.accent_hover } else { pal.accent }, Stroke::NONE),
+            Style::Primary => (if pressed { pal.accent_fill.gamma_multiply(0.85) } else if hovered { pal.accent_fill_hover } else { pal.accent_fill }, Stroke::NONE),
             Style::Danger => (if hovered { pal.err.gamma_multiply(0.9) } else { pal.err }, Stroke::NONE),
             Style::Secondary => (if pressed { pal.pressed } else if hovered { pal.hover } else { pal.panel }, Stroke::new(1.0, pal.border)),
             Style::Ghost => (if pressed { pal.pressed } else if hovered { pal.hover } else { Color32::TRANSPARENT }, Stroke::NONE),
@@ -230,18 +230,17 @@ pub fn chip(ui: &mut Ui, text: &str, on: bool) {
     ui.painter().galley(egui::pos2(rect.min.x + 9.0 + icon, rect.center().y - galley.size().y / 2.0), galley, color);
 }
 
-/// The app's mark: a focus reticle in the accent colour.
+/// The app icon (assets/brand), as in the Dock or taskbar.
 pub fn logo(ui: &mut Ui, size: f32) {
-    let pal = theme::p();
+    static TEXTURE: std::sync::OnceLock<egui::TextureHandle> = std::sync::OnceLock::new();
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    let c = rect.center();
-    let k = size / 26.0;
-    let p = ui.painter();
-    p.rect_filled(rect, 7.0 * k, pal.accent);
-    p.circle_stroke(c, 6.5 * k, Stroke::new(1.8 * k, pal.on_accent));
-    for d in [Vec2::new(1.0, 0.0), Vec2::new(-1.0, 0.0), Vec2::new(0.0, 1.0), Vec2::new(0.0, -1.0)] {
-        p.line_segment([c + d * 3.5 * k, c + d * 9.5 * k], Stroke::new(1.8 * k, pal.on_accent));
-    }
+    let tex = TEXTURE.get_or_init(|| {
+        let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/brand/icon/fokus-256.png")).expect("icon is a PNG");
+        let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+        ui.ctx().load_texture("fokus-logo", image, egui::TextureOptions::LINEAR)
+    });
+    // The PNG has the usual transparent margin around the rounded square.
+    ui.painter().image(tex.id(), rect.expand(size * 0.12), egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
 }
 
 /// A small upper-case section heading.
