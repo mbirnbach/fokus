@@ -321,3 +321,22 @@ unsaved-changes = Unsaved changes
 untested = untested
 zoom-in = Zoom in
 zoom-out = Zoom out
+
+## Updates
+
+section-updates = UPDATES
+update-after-job = Restart once the job is done.
+update-automatic = Look for updates automatically
+update-check = Check for updates
+update-checking = Looking for updates…
+update-downloading = Downloading Fokus { $version }…
+update-err-apple = The update isn't signed with the Fokus developer certificate; not installed.
+update-err-signature = The update isn't signed by the Fokus release builds; not installed.
+update-err-write = Fokus can't replace itself in { $folder }. Download the new version from the releases page.
+update-failed = Couldn't update: { $error }
+update-idle = Looks for updates a few seconds after starting, then every few hours.
+update-ready = Fokus { $version } is installed. Restart Fokus to use it.
+update-restart = Restart to update
+update-unavailable = This copy of Fokus can't update itself (a development build). New versions are on the releases page.
+update-up-to-date = Fokus is up to date.
+update-version = Version

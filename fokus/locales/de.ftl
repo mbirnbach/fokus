@@ -321,3 +321,22 @@ unsaved-changes = Ungespeicherte Änderungen
 untested = ungetestet
 zoom-in = Vergrößern
 zoom-out = Verkleinern
+
+## Updates
+
+section-updates = UPDATES
+update-after-job = Neu starten, sobald der Auftrag fertig ist.
+update-automatic = Automatisch nach Updates suchen
+update-check = Nach Updates suchen
+update-checking = Suche nach Updates…
+update-downloading = Fokus { $version } wird geladen…
+update-err-apple = Das Update ist nicht mit dem Fokus-Entwicklerzertifikat signiert und wurde nicht installiert.
+update-err-signature = Das Update ist nicht von den Fokus-Release-Builds signiert und wurde nicht installiert.
+update-err-write = Fokus kann sich in { $folder } nicht selbst ersetzen. Lade die neue Version von der Release-Seite.
+update-failed = Update fehlgeschlagen: { $error }
+update-idle = Sucht ein paar Sekunden nach dem Start nach Updates, danach alle paar Stunden.
+update-ready = Fokus { $version } ist installiert. Starte Fokus neu, um es zu verwenden.
+update-restart = Neu starten für Update
+update-unavailable = Diese Fokus-Kopie kann sich nicht selbst aktualisieren (ein Entwicklungs-Build). Neue Versionen gibt es auf der Release-Seite.
+update-up-to-date = Fokus ist auf dem neuesten Stand.
+update-version = Version

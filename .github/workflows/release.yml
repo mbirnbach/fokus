@@ -91,12 +91,20 @@ jobs:
             echo "NOTARY_KEY=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
           fi
 
+      # UPDATE_SIGNING_KEY signs the downloads for the app's updater (packaging/UPDATES.md).
+      # A release without it would never reach the installed apps, so it must be set then.
       - name: Package
         shell: bash
         env:
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
-        run: scripts/package.sh ${{ matrix.target }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ "${{ github.event_name }}" = release ] && [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "UPDATE_SIGNING_KEY is not set; see packaging/UPDATES.md" >&2
+            exit 1
+          fi
+          scripts/package.sh ${{ matrix.target }}
 
       - name: Keep as workflow artifact
         uses: actions/upload-artifact@v4

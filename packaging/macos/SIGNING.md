@@ -47,5 +47,5 @@ or `NOTARY_PROFILE` (a profile saved with `xcrun notarytool store-credentials`).
 
 ```bash
 MACOS_SIGN_IDENTITY="Developer ID Application: …" NOTARY_PROFILE=fokus scripts/package.sh aarch64-apple-darwin
-spctl -a -vv -t open --context context:primary-signature dist/fokus-*-aarch64-apple-darwin.dmg
+spctl -a -vv -t open --context context:primary-signature dist/fokus-*-mac-apple-silicon.dmg
 ```

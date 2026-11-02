@@ -13,6 +13,9 @@ pub struct Settings {
     /// "light" or "dark"; `None` follows the system.
     #[serde(default)]
     pub theme: Option<String>,
+    /// Don't look for updates by itself (Settings → Updates).
+    #[serde(default)]
+    pub no_update_checks: bool,
 }
 
 impl Settings {

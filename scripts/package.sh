@@ -12,7 +12,15 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 version="$(grep -m1 '^version' "$root/fokus/Cargo.toml" | cut -d'"' -f2)"
 out="$root/dist"
 bin_dir="$root/target/$target/release"
-name="fokus-$version-$target"
+# Download names say the system in words, not the target triple.
+case "$target" in
+  aarch64-apple-darwin) label=mac-apple-silicon ;;
+  x86_64-apple-darwin) label=mac-intel ;;
+  x86_64-pc-windows-msvc) label=windows ;;
+  x86_64-unknown-linux-gnu) label=linux-x86_64 ;;
+  *) label="$target" ;;
+esac
+name="fokus-$version-$label"
 mkdir -p "$out"
 rm -rf "${out:?}/$name" "$out/$name".*
 
@@ -99,4 +107,8 @@ case "$target" in
     ;;
 esac
 rm -rf "${out:?}/$name"
+# Signatures for the app's updater (.sig next to each file), when the key is there.
+if [ -n "${UPDATE_SIGNING_KEY:-}" ]; then
+  (cd "$root" && cargo run -q -p fokus-sign -- sign "$out/$name".*)
+fi
 ls -l "$out"/"$name".*

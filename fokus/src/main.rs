@@ -18,6 +18,7 @@ mod project;
 mod settings;
 mod textedit;
 mod theme;
+mod update;
 mod widgets;
 
 use eframe::egui;

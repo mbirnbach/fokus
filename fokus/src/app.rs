@@ -20,6 +20,7 @@ use crate::machine::{Conn, JobKind, JobPhase, Machine, Snapshot};
 use crate::materials::{Library, Material, OpSettings, Operation};
 use crate::project::{self, Project};
 use crate::t;
+use crate::update::{Status as UpdateStatus, Updater};
 use crate::theme::{self, Weight};
 use crate::widgets::{self, Btn};
 
@@ -116,6 +117,9 @@ pub struct FokusApp {
     quit_while_job: bool,
     window_title: String,
     settings: crate::settings::Settings,
+    updater: Updater,
+    /// Start Fokus again once it has closed (to use an installed update).
+    restart: bool,
 }
 
 impl FokusApp {
@@ -162,6 +166,8 @@ impl FokusApp {
             quit_while_job: false,
             window_title: String::new(),
             settings: crate::settings::Settings::load(),
+            updater: Updater::new(),
+            restart: false,
         };
         app.refresh_ports();
         if let Some(path) = open {
@@ -859,6 +865,15 @@ impl eframe::App for FokusApp {
     /// `ui` is skipped), so a close request is always caught here.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.guard_close(ctx);
+        // Restarting waits for the questions about unsaved changes; cancelling one cancels it.
+        if self.pending.is_none() && !self.allow_close {
+            self.restart = false;
+        }
+        self.updater.tick(ctx, !self.settings.no_update_checks);
+    }
+
+    fn on_exit(&mut self) {
+        self.updater.on_exit(self.restart);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1039,6 +1054,14 @@ impl FokusApp {
                 }
                 if Btn::new(t!("materials")).icon(Icon::Package).ghost().show(ui).clicked() {
                     self.show_library = true;
+                }
+                if let UpdateStatus::Ready { version } = self.updater.status() {
+                    let job = snap.job_active();
+                    let resp = ui.add_enabled_ui(!job, |ui| Btn::new(t!("update-restart")).icon(Icon::RotateCw).primary().show(ui)).inner;
+                    let tip = if job { t!("update-after-job") } else { t!("update-ready", version = version) };
+                    if resp.on_hover_text(tip).on_disabled_hover_text(t!("update-after-job")).clicked() {
+                        self.restart_for_update();
+                    }
                 }
                 ui.add_space(4.0);
                 let connected = snap.conn == Conn::Connected;
@@ -1994,9 +2017,62 @@ impl FokusApp {
                         ui.add_space(6.0);
                         ui.checkbox(&mut self.show_travel, t!("show-travel"));
                     });
+
+                    ui.add_space(16.0);
+                    widgets::section(ui, &t!("section-updates"));
+                    widgets::card(ui, |ui| self.updates_card(ui, snap));
                 });
             });
         });
+    }
+
+    /// Settings → Updates: the version, what the updater is doing, and a switch for it.
+    fn updates_card(&mut self, ui: &mut egui::Ui, snap: &Snapshot) {
+        let pal = theme::p();
+        widgets::kv(ui, &t!("update-version"), env!("CARGO_PKG_VERSION"));
+        let status = self.updater.status();
+        let (icon, color, text) = match &status {
+            UpdateStatus::Unavailable => (Icon::Info, pal.muted, t!("update-unavailable")),
+            UpdateStatus::Idle => (Icon::Info, pal.muted, t!("update-idle")),
+            UpdateStatus::Checking => (Icon::Repeat, pal.muted, t!("update-checking")),
+            UpdateStatus::UpToDate => (Icon::Check, pal.ok, t!("update-up-to-date")),
+            UpdateStatus::Downloading { version } => (Icon::FileDown, pal.accent, t!("update-downloading", version = version.clone())),
+            UpdateStatus::Ready { version } => (Icon::Check, pal.ok, t!("update-ready", version = version.clone())),
+            UpdateStatus::Failed(e) => (Icon::Warning, pal.err, t!("update-failed", error = e.clone())),
+        };
+        ui.add_space(4.0);
+        notice(ui, icon, color, &text);
+        if status == UpdateStatus::Unavailable {
+            return;
+        }
+        ui.add_space(6.0);
+        let mut automatic = !self.settings.no_update_checks;
+        if ui.checkbox(&mut automatic, t!("update-automatic")).changed() {
+            self.settings.no_update_checks = !automatic;
+            self.settings.save();
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if let UpdateStatus::Ready { .. } = status {
+                let job = snap.job_active();
+                let resp = ui.add_enabled_ui(!job, |ui| Btn::new(t!("update-restart")).icon(Icon::RotateCw).primary().show(ui)).inner;
+                if resp.on_disabled_hover_text(t!("update-after-job")).clicked() {
+                    self.restart_for_update();
+                }
+            } else {
+                let busy = matches!(status, UpdateStatus::Checking | UpdateStatus::Downloading { .. });
+                if ui.add_enabled_ui(!busy, |ui| Btn::new(t!("update-check")).icon(Icon::Repeat).show(ui)).inner.clicked() {
+                    self.updater.check(ui.ctx());
+                }
+            }
+        });
+    }
+
+    /// Close (after the usual questions) and start the installed update.
+    fn restart_for_update(&mut self) {
+        self.restart = true;
+        self.show_settings = false;
+        self.request(Pending::Quit);
     }
 
     /// Language: follow the system, or a fixed one (built-in or a community file).

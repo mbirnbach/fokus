@@ -67,6 +67,8 @@ experience. It replaces LightBurn and LotusCut for everyday jobs.
   keeps following the job.
 - **No laser at hand?** Save the job as an `.rd` file and run it from a USB stick.
 - **Feels at home.** Light and dark mode, English and German, on Windows, macOS and Linux.
+- **Keeps itself up to date.** New versions download in the background and are there the next
+  time you start Fokus.
 
 <table>
   <tr>
@@ -96,10 +98,15 @@ Get the latest version from the [releases page](https://github.com/mbirnbach/fok
 
 | System | Download | Then |
 |---|---|---|
-| macOS, Apple chip (M1 or newer) | `fokus-<version>-aarch64-apple-darwin.dmg` | Open it and drag Fokus into Applications. |
-| macOS, Intel chip | `fokus-<version>-x86_64-apple-darwin.dmg` | Open it and drag Fokus into Applications. |
-| Windows 10/11 | `fokus-<version>-x86_64-pc-windows-msvc.zip` | Unzip it and start `fokus.exe`. |
-| Linux x86_64 | `fokus-<version>-x86_64-unknown-linux-gnu.tar.gz` | Unpack it and start `fokus`. |
+| macOS, Apple chip (M1 or newer) | `fokus-<version>-mac-apple-silicon.dmg` | Open it and drag Fokus into Applications. |
+| macOS, Intel chip | `fokus-<version>-mac-intel.dmg` | Open it and drag Fokus into Applications. |
+| Windows 10/11 | `fokus-<version>-windows-setup.exe` | Run it. Fokus is then in the Start menu and opens `.fokus` projects. |
+| Linux x86_64 | `fokus-<version>-linux-x86_64.AppImage` | Make it executable (`chmod +x`) and start it. |
+
+Without installing: the Windows `.zip` (unzip it and start `fokus.exe`) and the Linux `.tar.gz`
+(unpack it and start `fokus`) hold the same app. Every one of them updates itself: when a new
+version is out, Fokus installs it in the background and shows **Restart to update**. Settings →
+Updates turns that off.
 
 <p align="center">
   <img src="docs/images/installer-macos.jpg" alt="The Fokus disk image on macOS: the app icon on the left, an arrow, and the Applications folder on the right" width="480">
@@ -108,7 +115,8 @@ Get the latest version from the [releases page](https://github.com/mbirnbach/fok
 > [!NOTE]
 > The Mac app is signed and notarised by Apple and opens right away. Elsewhere:
 >
-> - **Windows** SmartScreen says *"Windows protected your PC"*: choose **More info → Run anyway**.
+> - **Windows** isn't signed yet. SmartScreen says *"Windows protected your PC"* when you start
+>   the installer: choose **More info → Run anyway**.
 > - **Linux:** to use the USB connection, your user may need to be in the `dialout` group
 >   (`sudo usermod -aG dialout $USER`, then log out and in again).
 
@@ -212,7 +220,8 @@ fokus/          the desktop app (Rust and egui): canvas, layers, materials, jobs
   locales/      the English and German texts (Fluent files)
 ruida/          the Ruida protocol: .rd job files, the USB connection, status and job sending
 assets/brand/   the app icon, wordmark and DMG background, generated from scripts
-packaging/      what goes into the downloads (Info.plist, DMG layout, Linux desktop entry)
+packaging/      what goes into the downloads (DMG, Windows installer, AppImage) and how updates work
+tools/          fokus-sign, which signs the downloads for the updater
 ```
 
 A design is a set of shapes, each with a colour. When you start a job, Fokus turns every colour

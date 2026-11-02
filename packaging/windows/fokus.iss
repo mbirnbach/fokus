@@ -2,7 +2,7 @@
 ;   iscc /DVersion=<version> /DSource=<folder with fokus.exe> /DOutput=<dir> /DOutputName=<name> fokus.iss
 ; Installs for the current user without asking for admin rights (the dialog
 ; offers all users too), adds a Start menu entry, opens .fokus projects with
-; Fokus and comes with an uninstaller.
+; Fokus and comes with an uninstaller. Fokus's updater runs it silently.
 
 #ifndef Version
   #define Version "0.0.0"
@@ -57,3 +57,11 @@ Root: HKA; Subkey: "Software\Classes\Fokus.Project\shell\open\command"; ValueTyp
 
 [Run]
 Filename: "{app}\fokus.exe"; Description: "{cm:LaunchProgram,Fokus}"; Flags: nowait postinstall skipifsilent
+; Updates from inside Fokus run this installer silently; /RELAUNCH=1 starts Fokus again afterwards.
+Filename: "{app}\fokus.exe"; Flags: nowait skipifnotsilent; Check: Relaunch
+
+[Code]
+function Relaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
