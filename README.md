@@ -106,10 +106,8 @@ Get the latest version from the [releases page](https://github.com/mbirnbach/fok
 </p>
 
 > [!NOTE]
-> Fokus isn't code-signed yet, so your computer asks once before the first start:
+> The Mac app is signed and notarised by Apple and opens right away. Elsewhere:
 >
-> - **macOS** says it can't check the app for malicious software. Open *System Settings →
->   Privacy & Security*, scroll down and click **Open Anyway**. After that it opens normally.
 > - **Windows** SmartScreen says *"Windows protected your PC"*: choose **More info → Run anyway**.
 > - **Linux:** to use the USB connection, your user may need to be in the `dialout` group
 >   (`sudo usermod -aG dialout $USER`, then log out and in again).
