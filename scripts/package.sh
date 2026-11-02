@@ -28,7 +28,33 @@ case "$target" in
     cp "$bin_dir/fokus" "$app/Contents/MacOS/fokus"
     cp "$root/assets/brand/icon/fokus.icns" "$app/Contents/Resources/"
     sed "s/__VERSION__/$version/g" "$root/packaging/macos/Info.plist" > "$app/Contents/Info.plist"
-    # Not signed or notarised: macOS asks once (right-click → Open).
+    # Signed when MACOS_SIGN_IDENTITY names a "Developer ID Application"
+    # certificate in the keychain, notarised when there are notary
+    # credentials too: an App Store Connect API key (NOTARY_KEY = path to the
+    # .p8, NOTARY_KEY_ID, NOTARY_ISSUER) or a profile saved with
+    # `xcrun notarytool store-credentials` (NOTARY_PROFILE). Without them the
+    # app stays unsigned and macOS asks once (Privacy & Security → Open Anyway).
+    identity="${MACOS_SIGN_IDENTITY:-}"
+    notary=()
+    if [ -n "${NOTARY_KEY:-}" ]; then
+      notary=(--key "$NOTARY_KEY" --key-id "${NOTARY_KEY_ID:?}" --issuer "${NOTARY_ISSUER:?}")
+    elif [ -n "${NOTARY_PROFILE:-}" ]; then
+      notary=(--keychain-profile "$NOTARY_PROFILE")
+    fi
+    notarise() { # file to notarise, then staple
+      xcrun notarytool submit "$1" "${notary[@]}" --wait --timeout 30m
+      xcrun stapler staple "$2"
+    }
+    if [ -n "$identity" ]; then
+      codesign --force --timestamp --options runtime --sign "$identity" "$app"
+      codesign --verify --strict --verbose=2 "$app"
+      if [ ${#notary[@]} -gt 0 ]; then
+        # The app itself too, so it opens without a network check once copied out of the image.
+        ditto -c -k --keepParent "$app" "$out/$name-app.zip"
+        notarise "$out/$name-app.zip" "$app"
+        rm "$out/$name-app.zip"
+      fi
+    fi
     # A disk image with the app, an Applications link and the background that says what to do.
     # dmgbuild writes the Finder layout itself, so this needs no GUI session.
     venv="$root/target/dmgbuild-venv"
@@ -36,6 +62,10 @@ case "$target" in
     "$venv/bin/dmgbuild" -s "$root/packaging/macos/dmg-settings.py" \
       -D app="$app" -D background="$root/assets/brand/dmg/background.tiff" \
       "Fokus $version" "$out/$name.dmg" >/dev/null
+    if [ -n "$identity" ]; then
+      codesign --force --timestamp --sign "$identity" "$out/$name.dmg"
+      [ ${#notary[@]} -eq 0 ] || notarise "$out/$name.dmg" "$out/$name.dmg"
+    fi
     ;;
   *linux*)
     mkdir -p "$out/$name"
