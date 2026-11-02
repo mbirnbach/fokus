@@ -74,8 +74,12 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm "$RUNNER_TEMP/certificate.p12"
-          identity="$(security find-identity -v -p codesigning "$keychain" | grep -m1 -o '"Developer ID Application: [^"]*"' | tr -d '"')"
-          [ -n "$identity" ] || { echo "No Developer ID Application certificate in MACOS_CERTIFICATE_P12" >&2; exit 1; }
+          # The intermediate that makes a Developer ID certificate valid; not every runner image has it.
+          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain" || true
+          security find-identity -p codesigning "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | grep -m1 -o '"Developer ID Application: [^"]*"' | tr -d '"' || true)"
+          [ -n "$identity" ] || { echo "No valid Developer ID Application identity in MACOS_CERTIFICATE_P12 (see the list above)" >&2; exit 1; }
           echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
           if [ -n "$NOTARY_KEY_P8" ]; then
             printf '%s\n' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary.p8"
