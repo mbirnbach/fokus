@@ -22,7 +22,7 @@ case "$target" in
 esac
 name="fokus-$version-$label"
 mkdir -p "$out"
-rm -rf "${out:?}/$name" "$out/$name".*
+rm -rf "${out:?}/$name" "$out/$name".* "$out/$name"-setup.*
 
 case "$target" in
   *windows*)
@@ -108,7 +108,9 @@ case "$target" in
 esac
 rm -rf "${out:?}/$name"
 # Signatures for the app's updater (.sig next to each file), when the key is there.
+shopt -s nullglob
+files=("$out/$name".* "$out/$name"-setup.*)
 if [ -n "${UPDATE_SIGNING_KEY:-}" ]; then
-  (cd "$root" && cargo run -q -p fokus-sign -- sign "$out/$name".*)
+  (cd "$root" && cargo run -q -p fokus-sign -- sign "${files[@]}")
 fi
-ls -l "$out"/"$name".*
+ls -l "$out/$name".* "$out/$name"-setup.*
