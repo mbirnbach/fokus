@@ -21,6 +21,12 @@ case "$target" in
     mkdir -p "$out/$name"
     cp "$bin_dir/fokus.exe" "$root/README.md" "$out/$name/"
     (cd "$out" && 7z a -tzip "$name.zip" "$name" >/dev/null)
+    # The installer (Inno Setup 6 or newer; ISCC on PATH or in Program Files).
+    iscc="$(command -v iscc || ls "/c/Program Files (x86)/Inno Setup "*/ISCC.exe "/c/Program Files/Inno Setup "*/ISCC.exe 2>/dev/null | tail -1 || true)"
+    [ -n "$iscc" ] || { echo "Inno Setup not found (choco install innosetup)" >&2; exit 1; }
+    # Windows paths, and no MSYS path conversion of the /D options.
+    MSYS2_ARG_CONV_EXCL='*' "$iscc" /Q "/DVersion=$version" "/DSource=$(cygpath -w "$out/$name")" \
+      "/DOutput=$(cygpath -w "$out")" "/DOutputName=$name-setup" "$(cygpath -w "$root/packaging/windows/fokus.iss")"
     ;;
   *apple-darwin*)
     app="$out/$name/Fokus.app"
@@ -72,6 +78,20 @@ case "$target" in
     cp "$bin_dir/fokus" "$root/README.md" "$root/packaging/linux/fokus.desktop" "$out/$name/"
     cp "$root/assets/brand/icon/fokus-256.png" "$out/$name/fokus.png"
     tar -C "$out" -czf "$out/$name.tar.gz" "$name"
+    # An AppImage: one file that runs on most distributions. GTK and udev come from the system.
+    appdir="$out/$name.AppDir"
+    mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" "$appdir/usr/share/icons/hicolor/256x256/apps"
+    cp "$bin_dir/fokus" "$appdir/usr/bin/"
+    cp "$root/packaging/linux/fokus.desktop" "$appdir/usr/share/applications/"
+    cp "$root/assets/brand/icon/fokus-256.png" "$appdir/usr/share/icons/hicolor/256x256/apps/fokus.png"
+    ln -s usr/share/applications/fokus.desktop "$appdir/fokus.desktop"
+    ln -s usr/share/icons/hicolor/256x256/apps/fokus.png "$appdir/fokus.png"
+    ln -s usr/bin/fokus "$appdir/AppRun"
+    tool="$root/target/appimagetool-1.9.1-x86_64.AppImage"
+    [ -x "$tool" ] || { curl -fsSL -o "$tool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage && chmod +x "$tool"; }
+    # Extract-and-run, so building needs no FUSE.
+    ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$tool" --no-appstream "$appdir" "$out/$name.AppImage" >/dev/null
+    rm -rf "$appdir"
     ;;
   *)
     echo "unknown target $target" >&2
