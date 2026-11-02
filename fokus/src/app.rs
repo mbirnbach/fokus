@@ -112,6 +112,8 @@ pub struct FokusApp {
     pending: Option<Pending>,
     /// The user confirmed closing with unsaved changes.
     allow_close: bool,
+    /// Asking whether to stop the running job and close.
+    quit_while_job: bool,
     window_title: String,
     settings: crate::settings::Settings,
 }
@@ -157,6 +159,7 @@ impl FokusApp {
             saved: Saved { design: Design::default(), material: None, anchor: Anchor::TOP_RIGHT },
             pending: None,
             allow_close: false,
+            quit_while_job: false,
             window_title: String::new(),
             settings: crate::settings::Settings::load(),
         };
@@ -392,6 +395,39 @@ impl FokusApp {
         }
     }
 
+    /// Closing while the laser works: stop the job first, or stay.
+    fn quit_job_modal(&mut self, ctx: &egui::Context) {
+        if !self.quit_while_job {
+            return;
+        }
+        let pal = theme::p();
+        let mut stop_and_close = false;
+        let modal = egui::Modal::new(egui::Id::unique("quit-job")).frame(modal_frame()).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.label(RichText::new(t!("quit-job-title")).size(18.0).semibold());
+            ui.add_space(2.0);
+            ui.label(RichText::new(t!("quit-job-text")).color(pal.muted));
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if Btn::new(t!("stop-and-close")).icon(Icon::Stop).danger().show(ui).clicked() {
+                    stop_and_close = true;
+                }
+                if Btn::new(t!("cancel")).show(ui).clicked() {
+                    self.quit_while_job = false;
+                }
+            });
+        });
+        if modal.should_close() {
+            self.quit_while_job = false;
+        }
+        if stop_and_close {
+            self.quit_while_job = false;
+            self.machine.stop_job();
+            // Then the usual question about unsaved changes, if any.
+            self.request(Pending::Quit);
+        }
+    }
+
     /// Keep the window title in sync: "name (unsaved) — Fokus" while unsaved.
     fn update_title(&mut self, ctx: &egui::Context) {
         let title = if self.is_dirty() && !self.design.is_empty() {
@@ -405,15 +441,24 @@ impl FokusApp {
         }
     }
 
-    /// Ask before closing the window with unsaved changes.
+    /// Ask before closing the window while the laser runs a job (closing
+    /// stops it) or with unsaved changes.
     fn guard_close(&mut self, ctx: &egui::Context) {
         if self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_discard() {
+        if !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        let job_active = self.machine.snapshot().job_active();
+        if job_active || !self.allow_discard() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.pending = Some(Pending::Quit);
+            if job_active {
+                self.quit_while_job = true;
+            } else {
+                self.pending = Some(Pending::Quit);
+            }
             // Show the question (bring a hidden or minimised window back).
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -889,6 +934,7 @@ impl eframe::App for FokusApp {
         self.library_window(ui.ctx());
         self.prepare_modal(ui.ctx(), &snap);
         self.unsaved_modal(ui.ctx());
+        self.quit_job_modal(ui.ctx());
 
         if connected {
             let every = if snap.job_active() { 200 } else { 500 };
@@ -1765,7 +1811,8 @@ impl FokusApp {
         // Longer text goes on its own line under the title.
         let message = match &job.phase {
             JobPhase::Failed(e) => Some(e.clone()),
-            phase if phase.active() && snap.conn != Conn::Connected => Some(t!("job-reconnecting")),
+            // A note here says the Stop didn't get through: that matters most.
+            phase if phase.active() && snap.conn != Conn::Connected => Some(job.note.clone().unwrap_or_else(|| t!("job-reconnecting"))),
             _ => job.note.clone(),
         };
         Frame::new().fill(color.gamma_multiply(0.08)).stroke(Stroke::new(1.0, color.gamma_multiply(0.4))).corner_radius(12).inner_margin(Margin::same(12)).show(ui, |ui| {
@@ -1907,7 +1954,9 @@ impl FokusApp {
                             });
                         });
                         if busy {
-                            if Btn::new(t!("disconnect")).icon(Icon::Unplug).show(ui).clicked() {
+                            let resp = Btn::new(t!("disconnect")).icon(Icon::Unplug).show(ui);
+                            let resp = if snap.job_active() { resp.on_hover_text(t!("disconnect-stops-job")) } else { resp };
+                            if resp.clicked() {
                                 self.machine.disconnect();
                                 self.auto_connect = false;
                             }

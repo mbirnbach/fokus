@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use ruida::link::{StatusLink, Transport};
@@ -29,6 +29,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(6);
 /// then), how long to keep trying to open it again, and how often.
 const RECONNECT_FOR: Duration = Duration::from_secs(60);
 const RECONNECT_EVERY: Duration = Duration::from_millis(500);
+/// When Fokus quits, how long to wait for the worker to get a Stop out.
+const QUIT_PATIENCE: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Conn {
@@ -121,12 +123,13 @@ pub struct Machine {
     shared: Arc<Mutex<Snapshot>>,
     stop: Option<Arc<AtomicBool>>,
     tx: Option<Sender<Cmd>>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl Machine {
     pub fn new() -> Self {
         let snapshot = Snapshot { conn: Conn::Disconnected, port: None, status: None, updated: None, job: None };
-        Machine { shared: Arc::new(Mutex::new(snapshot)), stop: None, tx: None }
+        Machine { shared: Arc::new(Mutex::new(snapshot)), stop: None, tx: None, worker: None }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -134,11 +137,21 @@ impl Machine {
     }
 
     pub fn connect(&mut self, port: String, ctx: eframe::egui::Context) {
+        let open = {
+            let port = port.clone();
+            move || SerialTransport::open(&port, true).map_err(|e| t!("err-cannot-open-port", port = port.clone(), error = e.to_string()))
+        };
+        self.start_worker(Some(port), open, move || ctx.request_repaint());
+    }
+
+    /// Start the worker thread on whatever `open` connects to (a serial
+    /// port, or a simulated controller in tests).
+    fn start_worker<T: Transport + 'static>(&mut self, port: Option<String>, open: impl Fn() -> Result<T, String> + Send + 'static, repaint: impl Fn() + Send + 'static) {
         self.disconnect();
         {
             let mut s = self.shared.lock().unwrap();
             s.conn = Conn::Connecting;
-            s.port = Some(port.clone());
+            s.port = port;
             s.status = None;
         }
         let stop = Arc::new(AtomicBool::new(false));
@@ -146,9 +159,7 @@ impl Machine {
         self.stop = Some(stop.clone());
         self.tx = Some(tx);
         let shared = self.shared.clone();
-        thread::spawn(move || {
-            let repaint = || ctx.request_repaint();
-            let open = || SerialTransport::open(&port, true).map_err(|e| t!("err-cannot-open-port", port = port.clone(), error = e.to_string()));
+        self.worker = Some(thread::spawn(move || {
             let result = run(open, &shared, &stop, &rx, &repaint);
             let mut s = shared.lock().unwrap();
             s.conn = match result {
@@ -161,14 +172,22 @@ impl Machine {
                 job.ended = Some(Instant::now());
             }
             repaint();
-        });
+        }));
     }
 
+    /// Close the connection. A job that is still being sent or running is
+    /// stopped first: without the connection there would be no Stop button.
     pub fn disconnect(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            if self.shared.lock().unwrap().job_active() {
+                // The worker handles queued commands before it notices the
+                // closed queue, so this Stop still goes out.
+                let _ = tx.send(Cmd::Stop);
+            }
+        }
         if let Some(stop) = self.stop.take() {
             stop.store(true, Ordering::Relaxed);
         }
-        self.tx = None;
         self.shared.lock().unwrap().conn = Conn::Disconnected;
     }
 
@@ -219,6 +238,14 @@ impl Machine {
 impl Drop for Machine {
     fn drop(&mut self) {
         self.disconnect();
+        // Fokus is quitting: give the worker a moment to get the Stop to the
+        // laser before the process (and the thread with it) ends.
+        if let Some(worker) = self.worker.take() {
+            let deadline = Instant::now() + QUIT_PATIENCE;
+            while !worker.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
     }
 }
 
@@ -247,6 +274,8 @@ struct Watch {
     /// The connection dropped while the job ran, so we may have missed
     /// its start or end.
     lost: bool,
+    /// A Stop could not be written; send it again as soon as we can.
+    stop_pending: bool,
 }
 
 /// Open the port and serve it; if it is lost, keep reopening it for
@@ -295,13 +324,20 @@ fn serve<T: Transport>(mut link: StatusLink<T>, shared: &Mutex<Snapshot>, stop: 
     publish(shared, repaint, &status, stop);
 
     let mut failures = 0;
-    while !stop.load(Ordering::Relaxed) {
+    loop {
+        if watch.stop_pending {
+            link = handle(Cmd::Stop, link, shared, rx, repaint, watch);
+        }
+        // Commands first, so a Stop queued by a disconnect still goes out.
         loop {
             match rx.try_recv() {
                 Ok(cmd) => link = handle(cmd, link, shared, rx, repaint, watch),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return Ok(()),
             }
+        }
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
         }
         thread::sleep(POLL_INTERVAL);
         match link.poll(&mut status) {
@@ -318,7 +354,6 @@ fn serve<T: Transport>(mut link: StatusLink<T>, shared: &Mutex<Snapshot>, stop: 
             }
         }
     }
-    Ok(())
 }
 
 fn handle<T: Transport>(cmd: Cmd, link: StatusLink<T>, shared: &Mutex<Snapshot>, rx: &Receiver<Cmd>, repaint: &dyn Fn(), watch: &mut Watch) -> StatusLink<T> {
@@ -330,9 +365,18 @@ fn handle<T: Transport>(cmd: Cmd, link: StatusLink<T>, shared: &Mutex<Snapshot>,
             let result = sender.send_job(&plain, |sent, _| {
                 update_job(shared, |j| j.sent = sent);
                 repaint();
-                // Only Stop matters while sending.
-                while let Ok(cmd) = rx.try_recv() {
-                    stop_requested |= matches!(cmd, Cmd::Stop);
+                // Only Stop matters while sending. A closed queue means
+                // Fokus disconnected or quit: stop too, rather than leave
+                // the laser running a job nobody can stop from here.
+                loop {
+                    match rx.try_recv() {
+                        Ok(Cmd::Stop) | Err(TryRecvError::Disconnected) => {
+                            stop_requested = true;
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(TryRecvError::Empty) => break,
+                    }
                 }
                 !stop_requested
             });
@@ -341,12 +385,11 @@ fn handle<T: Transport>(cmd: Cmd, link: StatusLink<T>, shared: &Mutex<Snapshot>,
                     *watch = Watch::default();
                     update_job(shared, |j| j.phase = JobPhase::Running);
                 }
-                Ok(false) => {
-                    let _ = sender.stop();
-                    end_job(shared, JobPhase::Stopped);
-                }
+                Ok(false) => send_stop(&mut sender, shared, watch),
                 Err(e) => {
-                    let _ = sender.stop();
+                    // What was sent may be running; try to stop it, now or
+                    // after reconnecting.
+                    watch.stop_pending = sender.stop().is_err();
                     end_job(shared, JobPhase::Failed(t!("err-sending-failed", error = e.to_string())));
                 }
             }
@@ -373,17 +416,44 @@ fn handle<T: Transport>(cmd: Cmd, link: StatusLink<T>, shared: &Mutex<Snapshot>,
                 });
             }
         }
-        Cmd::Stop => {
-            let _ = sender.stop();
-            if shared.lock().unwrap().job_active() {
-                end_job(shared, JobPhase::Stopped);
-            }
-        }
+        Cmd::Stop => send_stop(&mut sender, shared, watch),
     }
     repaint();
     let mut link = StatusLink::new(sender.into_transport(), MAGIC_644X);
     link.timeout = Duration::from_millis(500);
     link
+}
+
+/// Send Stop. Only a Stop that was written ends the job; if it can't be
+/// written, the job stays active (so does the Stop button), the user is told
+/// to stop the machine itself, and [`serve`] keeps trying.
+fn send_stop<T: Transport>(sender: &mut JobSender<T>, shared: &Mutex<Snapshot>, watch: &mut Watch) {
+    match sender.stop() {
+        Ok(()) => {
+            watch.stop_pending = false;
+            update_job(shared, |j| {
+                if j.phase.active() {
+                    j.phase = JobPhase::Stopped;
+                    j.ended = Some(Instant::now());
+                    j.note = None;
+                }
+            });
+        }
+        Err(_) => {
+            update_job(shared, |j| {
+                if j.phase.active() {
+                    if j.phase == JobPhase::Sending {
+                        // Part of the job is on the machine and may run:
+                        // follow it like a running job.
+                        j.phase = JobPhase::Running;
+                        *watch = Watch::default();
+                    }
+                    j.note = Some(t!("err-stop-not-sent"));
+                }
+            });
+            watch.stop_pending = true;
+        }
+    }
 }
 
 /// Move a running job to Finished once the machine was busy and is idle
@@ -442,6 +512,8 @@ mod tests {
         stopped: bool,
         /// The USB adapter has dropped off: every read and write fails.
         gone: bool,
+        /// Time each job chunk takes to go out (flow control).
+        chunk_time: Duration,
     }
 
     #[derive(Clone, Default)]
@@ -469,6 +541,12 @@ mod tests {
                 reply.extend(encode_u35(value));
                 sim.out.extend(scramble(&reply, MAGIC_644X));
                 return Ok(());
+            }
+            if !sim.chunk_time.is_zero() {
+                let wait = sim.chunk_time;
+                drop(sim);
+                thread::sleep(wait);
+                sim = self.0.lock().unwrap();
             }
             if plain.windows(2).any(|w| w == [0xD8, 0x00]) {
                 sim.busy_polls = 5;
@@ -607,5 +685,86 @@ mod tests {
         assert!(j.note.is_some());
         assert_eq!(s.conn, Conn::Connected);
         stop.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn a_stop_that_does_not_get_through_is_not_reported_as_stopped() {
+        let (sim, shared, stop, tx) = start();
+        wait_for(&shared, |s| s.conn == Conn::Connected);
+        tx.send(Cmd::Send { plain: job(), estimate_s: 1.0, kind: JobKind::Job }).unwrap();
+        wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| j.phase == JobPhase::Running));
+        {
+            let mut s = sim.0.lock().unwrap();
+            s.busy_polls = 1000;
+            s.gone = true;
+        }
+        tx.send(Cmd::Stop).unwrap();
+        let s = wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| j.note.is_some()));
+        let j = s.job.unwrap();
+        assert!(j.phase.active(), "still active, with the Stop button: {:?}", j.phase);
+        assert_eq!(j.note, Some(t!("err-stop-not-sent")));
+        // Plug back in: the Stop is sent again and only then counts.
+        drop_out(&sim, &shared, |_| {});
+        let s = wait_for(&shared, |s| s.job.as_ref().is_some_and(|j| !j.phase.active()));
+        assert_eq!(s.job.unwrap().phase, JobPhase::Stopped);
+        assert!(sim.0.lock().unwrap().stopped, "D8 01 reached the controller");
+        stop.store(true, Ordering::Relaxed);
+    }
+
+    /// A Machine whose worker talks to a simulated controller.
+    fn machine(sim: &SimHandle) -> Machine {
+        let mut m = Machine::new();
+        let s = sim.clone();
+        m.start_worker(None, move || if s.0.lock().unwrap().gone { Err("gone".to_string()) } else { Ok(s.clone()) }, || {});
+        wait_for(&m.shared, |s| s.conn == Conn::Connected);
+        m
+    }
+
+    fn big_job() -> Vec<u8> {
+        let mut plain = vec![0xD8, 0x12, 0xD8, 0x00];
+        for _ in 0..5000 {
+            plain.extend([0x88, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        plain.push(0xD7);
+        plain
+    }
+
+    #[test]
+    fn disconnecting_while_sending_stops_the_job() {
+        let sim = SimHandle::default();
+        sim.0.lock().unwrap().chunk_time = Duration::from_millis(20);
+        let mut m = machine(&sim);
+        m.start_job(big_job(), 1.0, JobKind::Job).unwrap();
+        wait_for(&m.shared, |s| s.job.as_ref().is_some_and(|j| j.sent > 0));
+        m.disconnect();
+        let s = wait_for(&m.shared, |s| s.job.as_ref().is_some_and(|j| !j.phase.active()));
+        assert_eq!(s.job.unwrap().phase, JobPhase::Stopped);
+        let sim = sim.0.lock().unwrap();
+        assert!(sim.stopped, "D8 01 reached the controller");
+        assert!(!sim.received.contains(&0xD7), "the rest of the job was not sent");
+    }
+
+    #[test]
+    fn disconnecting_while_running_stops_the_job() {
+        let sim = SimHandle::default();
+        let mut m = machine(&sim);
+        m.start_job(job(), 1.0, JobKind::Job).unwrap();
+        wait_for(&m.shared, |s| s.job.as_ref().is_some_and(|j| j.phase == JobPhase::Running));
+        sim.0.lock().unwrap().busy_polls = 1000;
+        m.disconnect();
+        let s = wait_for(&m.shared, |s| s.job.as_ref().is_some_and(|j| !j.phase.active()));
+        assert_eq!(s.job.unwrap().phase, JobPhase::Stopped);
+        assert!(sim.0.lock().unwrap().stopped);
+    }
+
+    #[test]
+    fn quitting_stops_a_running_job_before_returning() {
+        let sim = SimHandle::default();
+        let m = machine(&sim);
+        m.start_job(job(), 1.0, JobKind::Job).unwrap();
+        wait_for(&m.shared, |s| s.job.as_ref().is_some_and(|j| j.phase == JobPhase::Running));
+        sim.0.lock().unwrap().busy_polls = 1000;
+        drop(m);
+        assert!(sim.0.lock().unwrap().stopped, "Stop was sent before Fokus went away");
     }
 }
