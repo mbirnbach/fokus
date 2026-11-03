@@ -15,7 +15,10 @@ use crate::t;
 pub const EXTENSION: &str = "fokus";
 const FORMAT: &str = "fokus-project";
 /// 2: paths as Bézier curves, text with any font family.
-const VERSION: u32 = 2;
+/// 3: images (written only when the design has one, so other projects still
+/// open in versions before it).
+const VERSION: u32 = 3;
+const VERSION_WITHOUT_IMAGES: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
@@ -28,7 +31,8 @@ pub struct Project {
 
 impl Project {
     pub fn new(design: Design, material: Option<String>, anchor: Anchor) -> Self {
-        Project { format: FORMAT.into(), version: VERSION, design, material, anchor }
+        let version = if design.objects.iter().any(|o| o.is_image()) { VERSION } else { VERSION_WITHOUT_IMAGES };
+        Project { format: FORMAT.into(), version, design, material, anchor }
     }
 
     pub fn to_json(&self) -> String {
@@ -136,6 +140,22 @@ mod tests {
         // Saved outlines are kept until the text is edited.
         assert_eq!(p.design.objects[1].outline()[0].len(), 4);
         assert_eq!(p.design.layers.len(), 2);
+    }
+
+    #[test]
+    fn images_are_saved_in_the_project() {
+        let mut p = sample();
+        assert_eq!(p.version, 2, "no images: still readable by older versions");
+        let png = crate::raster::png(4, 3, |x, y| image::Rgba([(x * 60) as u8, (y * 80) as u8, 0, 255]));
+        let image = crate::raster::ImageData::new(png).unwrap();
+        let look = crate::raster::ImageLook { brightness: 0.2, invert: true, ..Default::default() };
+        p.design.add(Object::new(Kind::Image { image, look }, (50.0, 50.0, 40.0, 30.0), [47, 158, 68]));
+        let p = Project::new(p.design, p.material, p.anchor);
+        assert_eq!(p.version, 3);
+        let back = Project::from_json(&p.to_json()).unwrap();
+        assert!(back.design.same_content(&p.design));
+        let Kind::Image { image, look: l } = &back.design.objects[3].kind else { panic!() };
+        assert_eq!((image.size(), *l), (Some((4, 3)), look));
     }
 
     #[test]

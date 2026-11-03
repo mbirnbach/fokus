@@ -63,6 +63,9 @@ experience. It replaces LightBurn and LotusCut for everyday jobs.
   font on your computer, typed straight onto the canvas. Every shape can be edited point by point.
 - **Opens your designs.** SVG files from Inkscape, Illustrator or Affinity, with every colour
   becoming a layer. Letters that overlap in a font still engrave solid.
+- **Engraves photos and logos.** Open a PNG, JPEG, BMP, GIF or WebP and it becomes a *Photo*
+  layer: greys turn into fine dots, or pick *Black & white* for logos. Brightness, contrast and
+  *Invert* (for dark materials) show right on the canvas.
 - **Runs the job and watches it.** Fokus sends the job over USB and shows progress, time left,
   *Pause* and *Stop*. If the USB connection drops for a moment, it reconnects by itself and
   keeps following the job.
@@ -186,8 +189,8 @@ Fokus keeps its settings and your material library here:
 
 - **Save** keeps your work as a `.fokus` project: the design, what every colour does, the
   material and the start point. Text is stored with its letter shapes, so a project looks the
-  same on a computer without that font. **Open** reads `.fokus` projects, `.svg` designs and `.rd`
-  job files (as a preview). The **⋮** menu has *Save as* and *Export job file (.rd)*.
+  same on a computer without that font, and images are stored inside the project. **Open** reads
+  `.fokus` projects, `.svg` designs, images and `.rd` job files (as a preview). The **⋮** menu has *Save as* and *Export job file (.rd)*.
 - **Materials** (top right) opens the material library. It comes with the settings for the
   materials in our workshop, taken from the machine's reference sheet; those marked *untested*
   haven't been tried on our laser yet. Adjust them, add your own or copy existing ones. To change

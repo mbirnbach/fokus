@@ -143,6 +143,36 @@ pub fn scan_shapes(polys: &[Vec<(i32, i32)>], shapes: &[Shape], interval: i32) -
     lines
 }
 
+/// Engraving lines from ready-made spans (a dithered image: each span a
+/// run of dots to burn), given as two-point paths `[(x0, y), (x1, y)]` in
+/// either direction. Spans on the same y form one line; lines run in the
+/// same order and alternating directions as [`scan_shapes`], starting with
+/// the line furthest out in Y.
+pub fn raster_lines(spans: &[Vec<(i32, i32)>]) -> Vec<ScanLine> {
+    let mut rows: std::collections::BTreeMap<i32, Vec<(i32, i32)>> = std::collections::BTreeMap::new();
+    for s in spans {
+        if let [(a, y), (b, _)] = s[..] {
+            if a != b {
+                rows.entry(y).or_default().push((a.min(b), a.max(b)));
+            }
+        }
+    }
+    let mut lines = Vec::new();
+    let mut leftwards = true;
+    for (y, mut spans) in rows.into_iter().rev() {
+        spans.sort_unstable();
+        if leftwards {
+            spans.reverse();
+            for s in &mut spans {
+                *s = (s.1, s.0);
+            }
+        }
+        lines.push(ScanLine { y, spans });
+        leftwards = !leftwards;
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +222,14 @@ mod tests {
         assert_eq!(lines[9].y, 50);
         assert_eq!(lines[0].spans, vec![(1_000, 0)]);
         assert_eq!(lines[1].spans, vec![(0, 1_000)]);
+    }
+
+    #[test]
+    fn raster_spans_become_alternating_lines() {
+        let spans = vec![vec![(0, 50), (100, 50)], vec![(400, 150), (300, 150)], vec![(0, 150), (200, 150)], vec![(5, 250), (5, 250)]];
+        let lines = raster_lines(&spans);
+        // Empty spans are dropped; the top line (y = 150) runs right to left.
+        assert_eq!(lines, vec![ScanLine { y: 150, spans: vec![(400, 300), (200, 0)] }, ScanLine { y: 50, spans: vec![(0, 100)] }]);
     }
 
     #[test]

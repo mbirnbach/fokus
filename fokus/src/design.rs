@@ -1,5 +1,5 @@
-//! The design being edited: a list of objects (shapes, paths, text), what
-//! happens to each colour, and undo history.
+//! The design being edited: a list of objects (shapes, paths, text,
+//! images), what happens to each colour, and undo history.
 //!
 //! Design coordinates are mm on the bed as seen from the front of the
 //! machine: x to the right, y down, origin at the bed's top-left. The job
@@ -8,7 +8,8 @@
 //!
 //! Burn settings are not stored here: a job uses one material, and each
 //! colour layer only says what to do (cut, mark, engrave or skip). The
-//! material supplies the speed and power for that operation.
+//! material supplies the speed and power for that operation. A layer with an
+//! image in it is always a Photo layer (or skipped).
 
 use std::path::Path;
 
@@ -20,6 +21,7 @@ use crate::bezier::{self, SubPath};
 use crate::fonts::{self, Ink};
 use crate::materials::{Material, OpSettings, Operation};
 use crate::paths;
+use crate::raster::{self, ImageData, ImageLook, ImageMode};
 use crate::t;
 
 pub type Pt = (f64, f64);
@@ -39,6 +41,12 @@ pub const MIN_SIZE: f64 = 0.1;
 pub const DEFAULT_TEXT_SIZE: f64 = 12.0;
 /// Speed of the Frame move around the design (mm/s, laser off).
 pub const FRAME_SPEED: f64 = 100.0;
+/// Dot size of Photo layers whose settings give no line spacing, mm (254 dpi).
+pub const DEFAULT_PHOTO_INTERVAL_MM: f32 = 0.1;
+/// Finest photo line spacing offered, mm (508 dpi; finer dots only blur).
+pub const MIN_PHOTO_INTERVAL_MM: f32 = 0.05;
+/// Longest side of an image when it is placed, mm.
+const IMAGE_PLACE_MAX_MM: f64 = 100.0;
 
 // ---------------------------------------------------------------- objects
 
@@ -77,6 +85,8 @@ pub enum Kind {
     /// Text as outlines, normalised to 0..1 of the object's box. `ink` is
     /// the outlines' box in layout units, `scale` mm per layout unit (x, y).
     Text { text: String, style: TextStyle, outlines: Vec<SubPath>, ink: Ink, scale: (f64, f64) },
+    /// A bitmap stretched over the object's box; engraved as dots.
+    Image { image: ImageData, look: ImageLook },
 }
 
 /// How objects are read from project files; older files stored paths as
@@ -109,6 +119,11 @@ enum KindFile {
         ink: Option<Ink>,
         #[serde(default)]
         scale: Option<(f64, f64)>,
+    },
+    Image {
+        image: ImageData,
+        #[serde(default)]
+        look: ImageLook,
     },
 }
 
@@ -143,6 +158,7 @@ impl From<KindFile> for Kind {
                 // Old files have no layout box: recompute it below (`Object::fix_text`).
                 Kind::Text { text, style, outlines: outlines.curves(), ink: ink.unwrap_or_default(), scale: scale.unwrap_or((0.0, 0.0)) }
             }
+            KindFile::Image { image, look } => Kind::Image { image, look },
         }
     }
 }
@@ -172,6 +188,7 @@ impl Object {
             Kind::Polygon { .. } => t!("object-polygon"),
             Kind::Path { .. } => t!("object-path"),
             Kind::Text { .. } => t!("object-text"),
+            Kind::Image { .. } => t!("object-image"),
         };
         Object { name, kind, x, y, w, h, rotation: 0.0, flip_x: false, flip_y: false, color, group: None }
     }
@@ -246,12 +263,28 @@ impl Object {
         matches!(self.kind, Kind::Path { filled: true, .. } | Kind::Text { .. })
     }
 
+    pub fn is_image(&self) -> bool {
+        matches!(self.kind, Kind::Image { .. })
+    }
+
+    /// What a new layer for this object does.
+    fn default_operation(&self) -> Operation {
+        if self.is_image() {
+            Operation::Photo
+        } else if self.fill_hint() {
+            Operation::Engrave
+        } else {
+            Operation::Cut
+        }
+    }
+
     /// The shape as curves in mm relative to the box's top-left, before
     /// flipping and rotation.
     fn local_curves(&self) -> Vec<SubPath> {
         let (w, h) = (self.w, self.h);
         match &self.kind {
             Kind::Rect { radius } => vec![bezier::rect(w, h, *radius)],
+            Kind::Image { .. } => vec![bezier::rect(w, h, 0.0)],
             Kind::Ellipse => vec![bezier::ellipse(w, h)],
             Kind::Polygon { sides } => vec![bezier::polygon(w, h, *sides)],
             Kind::Path { subpaths, .. } | Kind::Text { outlines: subpaths, .. } => subpaths.iter().map(|s| s.map(&|(u, v)| (u * w, v * h))).collect(),
@@ -295,9 +328,10 @@ impl Object {
     }
 
     /// Replace the shape with a path in design coordinates (no rotation or
-    /// flipping left), for editing its points. Text loses its letters.
+    /// flipping left), for editing its points. Text loses its letters;
+    /// images stay images.
     pub fn make_path(&mut self) {
-        if matches!(self.kind, Kind::Path { .. }) && self.rotation == 0.0 && !self.flip_x && !self.flip_y {
+        if self.is_image() || matches!(self.kind, Kind::Path { .. }) && self.rotation == 0.0 && !self.flip_x && !self.flip_y {
             return;
         }
         let filled = self.fill_hint();
@@ -410,7 +444,6 @@ pub struct LayerSettings {
 pub enum LayerProblem {
     NoMaterial,
     NotForMaterial(Operation),
-    Unsupported(Operation),
 }
 
 impl LayerProblem {
@@ -422,28 +455,28 @@ impl LayerProblem {
                 material = material.map(|m| m.name.clone()).unwrap_or_else(|| t!("problem-this-material")),
                 operation = op.label()
             ),
-            LayerProblem::Unsupported(op) => t!("problem-unsupported", operation = op.label()),
         }
     }
 }
 
 impl LayerSettings {
-    fn new(color: [u8; 3], filled: bool) -> Self {
-        let op = if filled { Operation::Engrave } else { Operation::Cut };
+    fn new(color: [u8; 3], op: Operation) -> Self {
         LayerSettings { color, action: Action::Do(op), adjusted: None }
     }
 
     /// The settings this layer will be lasered with.
     pub fn resolve(&self, material: Option<&Material>) -> Result<Option<(Operation, OpSettings)>, LayerProblem> {
         let Action::Do(op) = self.action else { return Ok(None) };
-        if op == Operation::Photo {
-            return Err(LayerProblem::Unsupported(op));
-        }
         if let Some(s) = &self.adjusted {
             return Ok(Some((op, s.clone())));
         }
         let material = material.ok_or(LayerProblem::NoMaterial)?;
-        material.settings(op).cloned().map(|s| Some((op, s))).ok_or(LayerProblem::NotForMaterial(op))
+        let mut s = material.settings(op).cloned().ok_or(LayerProblem::NotForMaterial(op))?;
+        // The reference sheet gives photo settings without a line spacing.
+        if op == Operation::Photo && s.line_interval_mm <= 0.0 {
+            s.line_interval_mm = DEFAULT_PHOTO_INTERVAL_MM;
+        }
+        Ok(Some((op, s)))
     }
 }
 
@@ -482,11 +515,23 @@ impl Design {
         self.revision += 1;
         for o in &self.objects {
             if !self.layers.iter().any(|l| l.color == o.color) {
-                self.layers.push(LayerSettings::new(o.color, o.fill_hint()));
+                self.layers.push(LayerSettings::new(o.color, o.default_operation()));
             }
         }
         let used: Vec<[u8; 3]> = self.objects.iter().map(|o| o.color).collect();
         self.layers.retain(|l| used.contains(&l.color));
+        // Images can only be engraved as photos.
+        for i in 0..self.layers.len() {
+            let l = &self.layers[i];
+            if matches!(l.action, Action::Do(op) if op != Operation::Photo) && self.has_images(l.color) {
+                self.layers[i] = LayerSettings::new(l.color, Operation::Photo);
+            }
+        }
+    }
+
+    /// Whether the layer has an image in it (and so is a Photo layer).
+    pub fn has_images(&self, color: [u8; 3]) -> bool {
+        self.objects.iter().any(|o| o.color == color && o.is_image())
     }
 
     pub fn add(&mut self, object: Object) -> usize {
@@ -520,6 +565,20 @@ impl Design {
         }
         self.touch();
         Ok((first..self.objects.len()).collect())
+    }
+
+    /// Place an image file with its top-right corner at `top_right`, at
+    /// 96 dpi but at most 10 cm on its longest side. Returns its index.
+    pub fn import_image(&mut self, path: &Path, top_right: Pt, color: [u8; 3]) -> Result<usize, String> {
+        let bytes = std::fs::read(path).map_err(|e| t!("err-could-not-read", file = path.display().to_string(), error = e.to_string()))?;
+        let image = ImageData::new(bytes).map_err(|_| t!("err-image-unreadable", file = path.display().to_string()))?;
+        let (pw, ph) = image.size().unwrap_or((1, 1));
+        let (mut w, mut h) = (pw as f64 * PX_TO_MM, ph as f64 * PX_TO_MM);
+        let k = (IMAGE_PLACE_MAX_MM / w.max(h)).min(1.0);
+        (w, h) = (w * k, h * k);
+        let mut o = Object::new(Kind::Image { image, look: ImageLook::default() }, (top_right.0 - w, top_right.1, w, h), color);
+        o.name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(o.name);
+        Ok(self.add(o))
     }
 
     fn new_group(&mut self) -> u32 {
@@ -661,10 +720,11 @@ impl Design {
 
     /// A layer's outlines for filling, mapped by `f` (design mm → µm), with
     /// one fill shape per object (each with its own rule; shapes are united).
-    pub fn layer_fill(&self, color: [u8; 3], f: impl Fn(Pt) -> (i32, i32)) -> (Vec<Vec<(i32, i32)>>, Vec<FillShape>) {
+    /// Images count as their box only with `images`.
+    pub fn layer_fill(&self, color: [u8; 3], images: bool, f: impl Fn(Pt) -> (i32, i32)) -> (Vec<Vec<(i32, i32)>>, Vec<FillShape>) {
         let mut polys = Vec::new();
         let mut shapes = Vec::new();
-        for o in self.objects.iter().filter(|o| o.color == color) {
+        for o in self.objects.iter().filter(|o| o.color == color && (images || !o.is_image())) {
             let outline: Vec<Vec<(i32, i32)>> = o.outline().into_iter().map(|pl| pl.into_iter().map(&f).collect()).collect();
             shapes.push(FillShape { len: outline.len(), rule: o.fill_rule() });
             polys.extend(outline);
@@ -673,16 +733,98 @@ impl Design {
     }
 
     /// A layer's outlines in design µm, for filling.
-    pub fn layer_fill_um(&self, color: [u8; 3]) -> (Vec<Vec<(i32, i32)>>, Vec<FillShape>) {
+    pub fn layer_fill_um(&self, color: [u8; 3], images: bool) -> (Vec<Vec<(i32, i32)>>, Vec<FillShape>) {
         let um = |v: f64| (v * 1000.0).round() as i32;
-        self.layer_fill(color, |(x, y)| (um(x), um(y)))
+        self.layer_fill(color, images, |(x, y)| (um(x), um(y)))
+    }
+
+    /// A Photo layer as dots `interval_mm` apart on the box around it, black
+    /// or white, row by row from the top: images dithered or cut at mid-grey
+    /// (as their look says), other shapes in the layer solid. Returns the
+    /// grid's top-left corner, its column count and the dots.
+    pub fn layer_dots(&self, color: [u8; 3], interval_mm: f32) -> Result<(Pt, usize, Vec<bool>), String> {
+        let step = interval_mm.max(0.01) as f64;
+        let objects: Vec<&Object> = self.objects.iter().filter(|o| o.color == color).collect();
+        let Some(((x0, y0), (x1, y1))) = objects.iter().map(|o| o.bounds()).reduce(union) else {
+            return Ok(((0.0, 0.0), 0, Vec::new()));
+        };
+        let cols = ((x1 - x0) / step).ceil().max(1.0) as usize;
+        let rows = ((y1 - y0) / step).ceil().max(1.0) as usize;
+        if cols.saturating_mul(rows) > raster::MAX_DOTS {
+            return Err(t!("err-photo-too-large"));
+        }
+        let mut ink = vec![0.0f32; cols * rows];
+        let mut diffuse = vec![false; cols * rows];
+        let centre = |c: usize, r: usize| (x0 + (c as f64 + 0.5) * step, y0 + (r as f64 + 0.5) * step);
+        let cell = |x: f64, y: f64| (((x - x0) / step).floor().max(0.0) as usize, ((y - y0) / step).floor().max(0.0) as usize);
+        // In drawing order: what's on top wins where objects overlap.
+        for o in objects {
+            let ((ox0, oy0), (ox1, oy1)) = o.bounds();
+            let (c0, r0) = cell(ox0, oy0);
+            let (c1, r1) = cell(ox1, oy1);
+            let (c1, r1) = ((c1 + 1).min(cols), (r1 + 1).min(rows));
+            match &o.kind {
+                Kind::Image { image, look } => {
+                    let pw = (o.w / step).ceil().max(1.0) as u32;
+                    let ph = (o.h / step).ceil().max(1.0) as u32;
+                    let Some(px) = image.resized(pw, ph) else { continue };
+                    for r in r0..r1 {
+                        for c in c0..c1 {
+                            let (lx, ly) = o.to_local(centre(c, r));
+                            let (u, v) = (lx / o.w, ly / o.h);
+                            if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                                continue;
+                            }
+                            let luma = px.get_pixel((u * pw as f64) as u32, (v * ph as f64) as u32)[0];
+                            ink[r * cols + c] = look.ink(luma);
+                            diffuse[r * cols + c] = look.mode == ImageMode::Dither;
+                        }
+                    }
+                }
+                _ => {
+                    let um = |v: f64| (v * 1000.0).round() as i32;
+                    let outline: Vec<Vec<(i32, i32)>> = o.outline().into_iter().map(|pl| pl.into_iter().map(|(x, y)| (um(x), um(y))).collect()).collect();
+                    let shape = [FillShape { len: outline.len(), rule: o.fill_rule() }];
+                    for r in r0..r1 {
+                        let y = centre(0, r).1 * 1000.0;
+                        for (a, b) in ruida::fill::spans_shapes(&outline, &shape, y) {
+                            for c in c0..c1 {
+                                let x = centre(c, r).0 * 1000.0;
+                                if x >= a as f64 && x < b as f64 {
+                                    ink[r * cols + c] = 1.0;
+                                    diffuse[r * cols + c] = false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(((x0, y0), cols, raster::dither(ink, &diffuse, cols)))
+    }
+
+    /// A Photo layer's burn spans as two-point paths, mapped by `f` (design
+    /// mm → µm); see [`Self::layer_dots`].
+    pub fn layer_spans(&self, color: [u8; 3], interval_mm: f32, f: impl Fn(Pt) -> (i32, i32)) -> Result<Vec<Vec<(i32, i32)>>, String> {
+        let ((x0, y0), cols, dots) = self.layer_dots(color, interval_mm)?;
+        let step = interval_mm.max(0.01) as f64;
+        let mut spans = Vec::new();
+        for (r, row) in dots.chunks(cols.max(1)).enumerate() {
+            let y = y0 + (r as f64 + 0.5) * step;
+            for (a, b) in raster::runs(row) {
+                spans.push(vec![f((x0 + a as f64 * step, y)), f((x0 + b as f64 * step, y))]);
+            }
+        }
+        Ok(spans)
     }
 
     /// Engraving geometry that drives the time: total width of all scan
     /// lines (from first to last span, gaps included) in mm, and line count.
+    /// Images count as their whole box (white rows are skipped in the job,
+    /// so photos with white borders take a little less).
     pub fn engrave_stats(&self, color: [u8; 3], interval_mm: f32) -> (f64, usize) {
         let interval = (interval_mm * 1000.0).round().max(1.0) as i32;
-        let (polys, shapes) = self.layer_fill_um(color);
+        let (polys, shapes) = self.layer_fill_um(color, true);
         let lines = ruida::fill::scan_shapes(&polys, &shapes, interval);
         let extent: f64 = lines
             .iter()
@@ -756,12 +898,14 @@ impl Design {
         // Each layer's paths are ordered from where the previous one ended
         // (the head, for the first), innermost shapes first.
         let mut pos = (0, 0);
-        Ok(layers
+        layers
             .into_iter()
             .map(|(l, op, s)| {
                 // Engraving is filled line by line: the outline order doesn't matter.
                 let (paths, shapes) = if op == Operation::Engrave {
-                    self.layer_fill(l.color, to_ctrl)
+                    self.layer_fill(l.color, false, to_ctrl)
+                } else if op == Operation::Photo {
+                    (self.layer_spans(l.color, s.line_interval_mm, to_ctrl)?, Vec::new())
                 } else {
                     let paths: Vec<Vec<(i32, i32)>> = self.layer_paths(l.color).into_iter().map(|pl| pl.into_iter().map(to_ctrl).collect()).collect();
                     let ordered = paths::order(paths, pos);
@@ -770,9 +914,11 @@ impl Design {
                     }
                     (ordered, Vec::new())
                 };
-                JobLayer {
+                let interval = (s.line_interval_mm * 1000.0).round() as i32;
+                Ok(JobLayer {
                 kind: match op {
-                    Operation::Engrave => LayerKind::Engrave { interval: (s.line_interval_mm * 1000.0).round() as i32 },
+                    Operation::Engrave => LayerKind::Engrave { interval },
+                    Operation::Photo => LayerKind::Raster { interval },
                     _ => LayerKind::Cut,
                 },
                 color: l.color,
@@ -783,8 +929,8 @@ impl Design {
                 air_assist: s.air_assist,
                 paths,
                 shapes,
-            }})
-            .collect())
+            })})
+            .collect()
     }
 }
 
@@ -1030,7 +1176,7 @@ mod tests {
         // Inter draws the bar of "t" over its stem: no gap where they cross.
         let mut d = Design::default();
         d.add(Object::text("t", TextStyle::default(), (0.0, 20.0), 20.0, [255, 0, 0]).unwrap());
-        let (polys, shapes) = d.layer_fill_um([255, 0, 0]);
+        let (polys, shapes) = d.layer_fill_um([255, 0, 0], true);
         let ((x0, y0), (x1, y1)) = d.objects[0].bounds();
         // Across the crossbar, a little above the middle of the letter.
         let mut found_bar = false;
@@ -1186,6 +1332,99 @@ mod tests {
         let frame_box = bounds(&mut pts.iter().copied());
         let job_box = bounds(&mut job.iter().flat_map(|l| l.paths.iter().flatten().copied()));
         assert_eq!(frame_box, job_box, "the frame is exactly the job's box");
+    }
+
+    /// A 2 × 1 mm image at (10, 10): black on the left half, white on the right.
+    fn half_black() -> Object {
+        let png = raster::png(2, 1, |x, _| if x == 0 { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) });
+        Object::new(Kind::Image { image: ImageData::new(png).unwrap(), look: ImageLook { mode: ImageMode::Threshold, ..ImageLook::default() } }, (10.0, 10.0, 2.0, 1.0), [47, 158, 68])
+    }
+
+    #[test]
+    fn image_layers_are_photo_layers() {
+        let mut d = design();
+        let i = d.add(half_black());
+        let photo = d.layers.iter().find(|l| l.color == [47, 158, 68]).unwrap();
+        assert_eq!(photo.action, Action::Do(Operation::Photo));
+        // An image moved onto a cut layer turns that layer into a Photo layer.
+        d.objects[i].color = [0, 0, 0];
+        d.touch();
+        assert_eq!(d.layers.iter().find(|l| l.color == [0, 0, 0]).unwrap().action, Action::Do(Operation::Photo));
+        // Skipping stays allowed.
+        d.layers.iter_mut().find(|l| l.color == [0, 0, 0]).unwrap().action = Action::Skip;
+        d.touch();
+        assert_eq!(d.layers.iter().find(|l| l.color == [0, 0, 0]).unwrap().action, Action::Skip);
+    }
+
+    #[test]
+    fn photo_settings_without_spacing_get_the_default() {
+        let mut d = Design::default();
+        d.add(half_black());
+        let (op, s) = d.layers[0].resolve(Some(&plywood())).unwrap().unwrap();
+        assert_eq!((op, s.line_interval_mm), (Operation::Photo, DEFAULT_PHOTO_INTERVAL_MM));
+    }
+
+    #[test]
+    fn photo_layer_becomes_raster_spans() {
+        let mut d = Design::default();
+        d.add(half_black());
+        let job = d.to_job(Some(&plywood()), true, Anchor::TOP_RIGHT).unwrap();
+        assert_eq!(job[0].kind, LayerKind::Raster { interval: 100 });
+        // 10 rows of 0.1 mm; on each, the black left millimetre. The machine's
+        // X counts from the right, so that is 1–2 mm from the head.
+        assert_eq!(job[0].paths.len(), 10);
+        for span in &job[0].paths {
+            let xs = (span[0].0.min(span[1].0), span[0].0.max(span[1].0));
+            assert_eq!(xs, (1_000, 2_000), "{span:?}");
+            assert_eq!(span[0].1, span[1].1);
+        }
+        let ys: Vec<i32> = job[0].paths.iter().map(|s| s[0].1).collect();
+        assert_eq!(ys, (0..10).map(|r| 50 + r * 100).collect::<Vec<_>>());
+        // The estimate counts the image's whole box: 10 lines of 2 mm.
+        let (op, s) = d.layers[0].resolve(Some(&plywood())).unwrap().unwrap();
+        let expected = Design::engrave_time_s(20.0, 10, s.speed);
+        assert!((d.layer_time_s([47, 158, 68], op, &s) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mirrored_images_burn_mirrored() {
+        let mut d = Design::default();
+        let mut o = half_black();
+        o.flip_x = true;
+        d.add(o);
+        let job = d.to_job(Some(&plywood()), true, Anchor::TOP_RIGHT).unwrap();
+        assert!(job[0].paths.iter().all(|s| s[0].0.min(s[1].0) == 0 && s[0].0.max(s[1].0) == 1_000));
+    }
+
+    #[test]
+    fn shapes_in_a_photo_layer_burn_solid_and_grey_dithers() {
+        let mut d = Design::default();
+        let grey = raster::png(10, 10, |_, _| image::Rgba([191, 191, 191, 255]));
+        d.add(Object::new(Kind::Image { image: ImageData::new(grey).unwrap(), look: ImageLook::default() }, (0.0, 0.0, 10.0, 10.0), [47, 158, 68]));
+        d.add(Object::new(Kind::Rect { radius: 0.0 }, (20.0, 0.0, 10.0, 10.0), [47, 158, 68]));
+        let ((x0, _), cols, dots) = d.layer_dots([47, 158, 68], 0.1).unwrap();
+        assert_eq!((x0, cols), (0.0, 300));
+        let share = |c0: usize, c1: usize| {
+            let n = dots.chunks(cols).map(|row| row[c0..c1].iter().filter(|&&v| v).count()).sum::<usize>();
+            n as f64 / ((c1 - c0) * dots.len() / cols) as f64
+        };
+        // 75 % grey: about a quarter of the dots burn; the rectangle fully, the gap not at all.
+        assert!((share(0, 100) - 0.25).abs() < 0.03, "{}", share(0, 100));
+        assert_eq!(share(100, 200), 0.0);
+        assert_eq!(share(200, 300), 1.0);
+    }
+
+    #[test]
+    fn photo_job_decodes() {
+        let mut d = design();
+        d.add(half_black());
+        let job = d.to_job(Some(&plywood()), true, Anchor::TOP_RIGHT).unwrap();
+        let plain = ruida::writer::write_plain(&job).unwrap();
+        let tp = ruida::job::Toolpath::from_records(&ruida::command::parse(&plain));
+        assert_eq!(tp.unknown_commands, 0);
+        // Engrave, photo, cut: the photo burns 10 lines of 1 mm.
+        assert_eq!(tp.layers.len(), 3);
+        assert!((tp.layers[&1].cut_mm - 10.0).abs() < 1e-6, "{}", tp.layers[&1].cut_mm);
     }
 
     #[test]

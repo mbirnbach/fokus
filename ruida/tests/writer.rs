@@ -168,3 +168,32 @@ fn each_layer_body_gets_its_own_work_mode() {
     assert_eq!(body(0), vec![0xCA, 0x01, 0x01], "engrave layer: scan mode");
     assert_eq!(body(1), vec![0xCA, 0x01, 0x00], "cut layer: cut mode");
 }
+
+/// Raster spans burn exactly like the same lines from a filled outline,
+/// in scan mode.
+#[test]
+fn raster_layer_burns_like_the_equivalent_engraving() {
+    let engrave = JobLayer {
+        kind: LayerKind::Engrave { interval: 100 },
+        color: [0, 0, 0],
+        speed: 1000.0,
+        min_power: 45.0,
+        max_power: 45.0,
+        passes: 1,
+        air_assist: true,
+        paths: vec![vec![(0, 0), (3_000, 0), (3_000, 1_000), (0, 1_000)]],
+        shapes: Vec::new(),
+    };
+    // The same ten lines (y = 50, 150, … 950) as spans, given in any direction and order.
+    let spans: Vec<Vec<(i32, i32)>> = (0..10).map(|i| if i % 3 == 0 { vec![(3_000, 50 + i * 100), (0, 50 + i * 100)] } else { vec![(0, 50 + i * 100), (3_000, 50 + i * 100)] }).collect();
+    let raster = JobLayer { kind: LayerKind::Raster { interval: 100 }, paths: spans, ..engrave.clone() };
+    let cuts = |l: JobLayer| -> Vec<_> {
+        let plain = write_plain(&[l]).unwrap();
+        let at = plain.windows(3).position(|w| w == [0xCA, 0x02, 0]).unwrap();
+        assert_eq!(plain[at - 3..at], [0xCA, 0x01, 0x01], "scan mode");
+        let tp = Toolpath::from_records(&parse(&plain));
+        assert_eq!(tp.unknown_commands, 0);
+        tp.segments.into_iter().filter(|s| s.cut).map(|s| (s.from, s.to)).collect()
+    };
+    assert_eq!(cuts(raster), cuts(engrave));
+}

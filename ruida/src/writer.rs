@@ -1,4 +1,5 @@
-//! Writing `.rd` job files: vector cut / score layers and fill engraving.
+//! Writing `.rd` job files: vector cut / score layers, fill engraving and
+//! raster (image) engraving.
 //!
 //! The byte layout mirrors what LightBurn 1.7 writes for our 644XG
 //! (tests/data/lightburn_square_text.rd), so the controller sees a structure
@@ -32,6 +33,10 @@ pub enum LayerKind {
     Cut,
     /// Fill the closed paths line by line ("Scan"), lines `interval` µm apart.
     Engrave { interval: i32 },
+    /// Burn ready-made spans line by line ("Scan"), e.g. a dithered image:
+    /// each path is one span `[(x0, y), (x1, y)]` (see [`fill::raster_lines`]),
+    /// lines `interval` µm apart.
+    Raster { interval: i32 },
 }
 
 /// One layer of paths, all burned with the same settings.
@@ -46,7 +51,7 @@ pub struct JobLayer {
     pub max_power: f32,
     pub passes: u32,
     pub air_assist: bool,
-    /// Polylines (Cut) or closed outlines (Engrave) in µm, relative to the head.
+    /// Polylines (Cut), closed outlines (Engrave) or spans (Raster) in µm, relative to the head.
     pub paths: Vec<Vec<(i32, i32)>>,
     /// Engrave: how `paths` form filled shapes (see [`fill::spans_shapes`]);
     /// empty fills all paths as one even-odd shape.
@@ -102,6 +107,7 @@ fn has_geometry(l: &JobLayer) -> bool {
     match l.kind {
         LayerKind::Cut => l.paths.iter().any(|p| p.len() >= 2),
         LayerKind::Engrave { interval } => !fill::scan_shapes(&l.paths, &l.shapes, interval).is_empty(),
+        LayerKind::Raster { .. } => !fill::raster_lines(&l.paths).is_empty(),
     }
 }
 
@@ -121,7 +127,7 @@ fn validate(layers: &[JobLayer]) -> Result<(), WriteError> {
         if !(1..=MAX_PASSES).contains(&l.passes) {
             return Err(WriteError::BadPasses { layer: i });
         }
-        if let LayerKind::Engrave { interval } = l.kind {
+        if let LayerKind::Engrave { interval } | LayerKind::Raster { interval } = l.kind {
             if !(10..=1000).contains(&interval) {
                 return Err(WriteError::BadInterval { layer: i });
             }
@@ -193,7 +199,7 @@ fn write_cut_body(o: &mut Out, l: &JobLayer) {
 /// Scan layers as LightBurn writes them: an absolute move to the first
 /// span, then relative cuts (AA) and gaps (8A) along each line, and a
 /// relative step (8B, or 89 when X changes too) to the next line.
-fn write_engrave_body(o: &mut Out, l: &JobLayer, interval: i32) {
+fn write_scan_body(o: &mut Out, l: &JobLayer, lines: &[fill::ScanLine]) {
     o.op(&[0xC9, 0x02]).speed(l.speed);
     o.op(&[0xC6, 0x01]).power(l.min_power);
     o.op(&[0xC6, 0x02]).power(l.max_power);
@@ -203,10 +209,9 @@ fn write_engrave_body(o: &mut Out, l: &JobLayer, interval: i32) {
     o.op(&[0xC6, 0x13]).op(&encode_u35(0));
     o.op(&[0xCA, 0x03, 0x01]);
 
-    let lines = fill::scan_shapes(&l.paths, &l.shapes, interval);
     for _ in 0..l.passes {
         let mut pos: Option<(i32, i32)> = None;
-        for line in &lines {
+        for line in lines {
             for &(from, to) in &line.spans {
                 let start = (from, line.y);
                 match pos {
@@ -266,7 +271,7 @@ pub fn write_plain(layers: &[JobLayer]) -> Result<Vec<u8>, WriteError> {
         o.op(&[0xCA, 0x06, p]).op(&encode_u35(r as u64 | (g as u64) << 8 | (b as u64) << 16));
         let mode = match l.kind {
             LayerKind::Cut => 0x00,
-            LayerKind::Engrave { .. } => 0x02,
+            LayerKind::Engrave { .. } | LayerKind::Raster { .. } => 0x02,
         };
         o.op(&[0xCA, 0x41, p, mode]);
         o.op(&[0xE7, 0x52, p]).point(*lmin);
@@ -303,14 +308,15 @@ pub fn write_plain(layers: &[JobLayer]) -> Result<Vec<u8>, WriteError> {
     for (p, l) in layers.iter().enumerate() {
         o.op(&[0xCA, 0x01, match l.kind {
             LayerKind::Cut => 0x00,
-            LayerKind::Engrave { .. } => 0x01,
+            LayerKind::Engrave { .. } | LayerKind::Raster { .. } => 0x01,
         }]);
         o.op(&[0xCA, 0x02, p as u8]);
         o.op(&[0xCA, 0x01, 0x30, 0xCA, 0x01, 0x10]);
         o.op(&[0xCA, 0x01, if l.air_assist { 0x13 } else { 0x12 }]);
         match l.kind {
             LayerKind::Cut => write_cut_body(&mut o, l),
-            LayerKind::Engrave { interval } => write_engrave_body(&mut o, l, interval),
+            LayerKind::Engrave { interval } => write_scan_body(&mut o, l, &fill::scan_shapes(&l.paths, &l.shapes, interval)),
+            LayerKind::Raster { .. } => write_scan_body(&mut o, l, &fill::raster_lines(&l.paths)),
         }
     }
     o.op(&[0xE7, 0x00, 0xEB, 0xE7, 0x00]);

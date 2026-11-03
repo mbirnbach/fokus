@@ -187,7 +187,16 @@ impl Library {
                 .map_err(|e| e.to_string())
                 .and_then(|s| serde_json::from_str::<Vec<Material>>(&s).map_err(|e| e.to_string()));
             match read {
-                Ok(materials) => lib.materials = materials,
+                Ok(mut materials) => {
+                    // Up to 0.1.2 the settings editor turned an unset photo
+                    // spacing into its minimum, 0.01 mm, when it was shown.
+                    for p in materials.iter_mut().filter_map(|m| m.photo.as_mut()) {
+                        if p.line_interval_mm > 0.0 && p.line_interval_mm <= 0.01 {
+                            p.line_interval_mm = 0.0;
+                        }
+                    }
+                    lib.materials = materials;
+                }
                 Err(e) => lib.error = Some(t!("err-could-not-read", file = path.display().to_string(), error = e)),
             }
         }

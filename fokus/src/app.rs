@@ -12,13 +12,14 @@ use eframe::egui::{self, Align, Color32, Event, Frame, Key, Layout, Margin, Modi
 use ruida::serial::{list_ports, PortInfo};
 
 use crate::canvas::{Canvas, Edit, Scene, Tool, ZoomTarget};
-use crate::design::{Action, Anchor, Design, History, Kind, LayerProblem, Object, Pt, TextStyle, DEFAULT_TEXT_SIZE, MIN_SIZE};
+use crate::design::{Action, Anchor, Design, History, Kind, LayerProblem, Object, Pt, TextStyle, DEFAULT_PHOTO_INTERVAL_MM, DEFAULT_TEXT_SIZE, MIN_PHOTO_INTERVAL_MM, MIN_SIZE};
 use crate::fonts;
 use crate::icons::{self, Icon};
 use crate::job::Job;
 use crate::machine::{Conn, JobKind, JobPhase, Machine, Snapshot};
 use crate::materials::{Library, Material, OpSettings, Operation};
 use crate::project::{self, Project};
+use crate::raster::{ImageLook, ImageMode};
 use crate::t;
 use crate::update::{Status as UpdateStatus, Updater};
 use crate::theme::{self, Weight};
@@ -26,6 +27,8 @@ use crate::widgets::{self, Btn};
 
 const DEFAULT_BED: (f64, f64) = (1000.0, 600.0);
 const PORT_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+/// Image files Fokus opens (as Photo objects).
+const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
 
 /// Layer colours offered in the palette (LightBurn-like).
 const PALETTE: [[u8; 3]; 10] = [
@@ -203,13 +206,13 @@ impl FokusApp {
         }
     }
 
-    /// Open an SVG (added to the design) or an .rd job (preview only). New
-    /// designs go to the head if known, else near the origin corner.
+    /// Open an SVG or image (added to the design) or an .rd job (preview
+    /// only). New designs go to the head if known, else near the origin corner.
     fn open_file(&mut self, path: &Path, snap: Option<&Snapshot>) {
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         self.file_error = None;
         match ext.as_str() {
-            "svg" => {
+            "svg" | "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp" => {
                 let bed = snap.map(|s| self.bed(s)).unwrap_or(DEFAULT_BED);
                 let head = snap.and_then(|s| s.status.as_ref()).map(|s| s.position);
                 let corner = match (head, self.design.bounds()) {
@@ -219,7 +222,15 @@ impl FokusApp {
                     (None, None) => self.to_view(bed, (10.0, 10.0)),
                 };
                 self.history.checkpoint(&self.design);
-                match self.design.import_svg(path, corner) {
+                let added = if ext == "svg" {
+                    self.design.import_svg(path, corner)
+                } else {
+                    // Its own colour, so it gets a Photo layer of its own.
+                    let used: Vec<[u8; 3]> = self.design.layers.iter().map(|l| l.color).collect();
+                    let color = PALETTE.iter().skip(1).find(|c| !used.contains(c)).copied().unwrap_or(PALETTE[2]);
+                    self.design.import_image(path, corner, color).map(|i| vec![i])
+                };
+                match added {
                     Ok(new) => {
                         self.job = None;
                         self.selection = new;
@@ -245,7 +256,8 @@ impl FokusApp {
     }
 
     fn pick_file(&mut self, snap: Option<&Snapshot>) {
-        if let Some(path) = rfd::FileDialog::new().add_filter(t!("filter-all"), &[project::EXTENSION, "svg", "rd"]).pick_file() {
+        let extensions: Vec<&str> = [project::EXTENSION, "svg", "rd"].into_iter().chain(IMAGE_EXTENSIONS).collect();
+        if let Some(path) = rfd::FileDialog::new().add_filter(t!("filter-all"), &extensions).pick_file() {
             self.open_file(&path, snap);
         }
     }
@@ -577,7 +589,7 @@ impl FokusApp {
             .map(|l| {
                 let (op, s) = l.resolve(material).ok().flatten()?;
                 let time = match op {
-                    Operation::Engrave => {
+                    Operation::Engrave | Operation::Photo => {
                         let key = (l.color, (s.line_interval_mm * 1000.0).round() as i32, design.revision);
                         let (extent, lines) = *cache.entry(key).or_insert_with(|| design.engrave_stats(l.color, s.line_interval_mm));
                         Design::engrave_time_s(extent, lines, s.speed) * s.passes as f64
@@ -1378,6 +1390,17 @@ impl FokusApp {
                     self.convert_to_path();
                 }
             }
+            Kind::Image { image, mut look } => {
+                widgets::vdivider(ui);
+                let (started, changed) = image_controls(ui, &mut look);
+                if started {
+                    self.history.checkpoint(&self.design);
+                }
+                if changed {
+                    self.design.objects[i].kind = Kind::Image { image, look };
+                    self.design.touch();
+                }
+            }
             _ => {}
         }
     }
@@ -1462,12 +1485,13 @@ impl FokusApp {
             self.flip(false);
         }
         ui.separator();
-        let all_paths = self.selection.iter().all(|&i| matches!(self.design.objects[i].kind, Kind::Path { .. }));
+        let all_paths = self.selection.iter().all(|&i| matches!(self.design.objects[i].kind, Kind::Path { .. } | Kind::Image { .. }));
         if !all_paths && widgets::menu_item(ui, Some(Icon::TypeOutline), &t!("convert-to-path"), "").clicked() {
             self.canvas.finish_text(&mut self.design, &mut self.selection);
             self.convert_to_path();
         }
-        if self.tool != Tool::Nodes && widgets::menu_item(ui, Some(Icon::PointerHollow), &t!("edit-points"), "A").clicked() {
+        let any_points = self.selection.iter().any(|&i| crate::canvas::editable(&self.design, i));
+        if any_points && self.tool != Tool::Nodes && widgets::menu_item(ui, Some(Icon::PointerHollow), &t!("edit-points"), "A").clicked() {
             self.set_tool(Tool::Nodes);
         }
         ui.separator();
@@ -1493,6 +1517,29 @@ impl FokusApp {
 }
 
 /// Font, size, bold and italic for text. Returns whether anything changed.
+/// An image's mode and tone in the properties bar. Returns (an edit
+/// starts: take an undo step, the look changed).
+fn image_controls(ui: &mut egui::Ui, look: &mut ImageLook) -> (bool, bool) {
+    let before = *look;
+    let mut started = false;
+    ui.allocate_ui(Vec2::new(210.0, 32.0), |ui| {
+        widgets::segmented(ui, &mut look.mode, &[(ImageMode::Dither, t!("image-dither")), (ImageMode::Threshold, t!("image-threshold"))]);
+    });
+    for (label, value, hint) in [(t!("image-brightness"), &mut look.brightness, t!("image-brightness-hint")), (t!("image-contrast"), &mut look.contrast, t!("image-contrast-hint"))] {
+        widgets::field_label(ui, &label);
+        let mut percent = (*value * 100.0).round();
+        let r = ui.add_sized([62.0, 26.0], egui::DragValue::new(&mut percent).speed(1.0).suffix(" %").range(-100.0..=100.0)).on_hover_text(hint);
+        started |= r.drag_started() || r.gained_focus();
+        if r.changed() {
+            *value = percent / 100.0;
+        }
+    }
+    ui.checkbox(&mut look.invert, t!("image-invert")).on_hover_text(t!("image-invert-hint"));
+    let changed = *look != before;
+    // Clicks (mode, invert) are a whole edit at once.
+    (started || changed && before.mode != look.mode || before.invert != look.invert, changed)
+}
+
 fn text_controls(ui: &mut egui::Ui, style: &mut TextStyle, size: &mut f64, filter: &mut String) -> bool {
     let mut changed = font_picker(ui, &mut style.family, filter);
     widgets::field_label(ui, &t!("text-size"));
@@ -1683,6 +1730,7 @@ impl FokusApp {
         let estimates = self.layer_estimates();
         let material = self.material().cloned();
         let mut select_color = None;
+        let photo: Vec<bool> = self.design.layers.iter().map(|l| self.design.has_images(l.color)).collect();
         for (idx, layer) in self.design.layers.iter_mut().enumerate() {
             widgets::card(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -1700,7 +1748,12 @@ impl FokusApp {
                     });
                 });
                 let before = layer.action;
-                widgets::segmented(ui, &mut layer.action, &[(Action::Do(Operation::Cut), Operation::Cut.label()), (Action::Do(Operation::Mark), Operation::Mark.label()), (Action::Do(Operation::Engrave), Operation::Engrave.label()), (Action::Skip, t!("action-skip"))]);
+                if photo[idx] {
+                    // Images can only be engraved as photos.
+                    widgets::segmented(ui, &mut layer.action, &[(Action::Do(Operation::Photo), Operation::Photo.label()), (Action::Skip, t!("action-skip"))]);
+                } else {
+                    widgets::segmented(ui, &mut layer.action, &[(Action::Do(Operation::Cut), Operation::Cut.label()), (Action::Do(Operation::Mark), Operation::Mark.label()), (Action::Do(Operation::Engrave), Operation::Engrave.label()), (Action::Skip, t!("action-skip"))]);
+                }
                 if layer.action != before {
                     layer.adjusted = None;
                 }
@@ -2467,7 +2520,13 @@ fn settings_editor(ui: &mut egui::Ui, op: Operation, s: &mut OpSettings, id: imp
         ui.end_row();
         if op.uses_line_interval() {
             row(ui, Icon::Rows, t!("line-spacing"));
-            changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.line_interval_mm).range(0.01..=1.0).suffix(" mm").speed(0.005).max_decimals(3)).changed();
+            // The field clamps what it shows into its range, so give unset
+            // photo spacing its real default instead of the minimum.
+            if op == Operation::Photo && s.line_interval_mm <= 0.0 {
+                s.line_interval_mm = DEFAULT_PHOTO_INTERVAL_MM;
+            }
+            let min = if op == Operation::Photo { MIN_PHOTO_INTERVAL_MM } else { 0.01 };
+            changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.line_interval_mm).range(min..=1.0).suffix(" mm").speed(0.005).max_decimals(3)).changed();
             ui.end_row();
         }
         row(ui, Icon::Repeat, t!("passes"));

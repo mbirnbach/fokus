@@ -1,6 +1,6 @@
 //! The canvas: the laser bed with the design on it, the drawing tools,
 //! selection, moving, resizing and rotating, the point editor and typing
-//! text in place.
+//! text in place. Images are drawn with their tone settings applied.
 //!
 //! Coordinates: design mm are bed mm as seen from the front (x right, y down,
 //! origin top-left). Controller mm are what the Ruida reports; on our machine
@@ -16,6 +16,7 @@ use crate::fonts;
 use crate::icons::{self, Icon};
 use crate::job::Job;
 use crate::materials::{Material, Operation};
+use crate::raster::{ImageData, ImageLook};
 use crate::t;
 use crate::textedit::{self, Caret};
 use crate::theme;
@@ -718,12 +719,13 @@ impl Canvas {
                         self.place_caret(design, mm, false);
                         self.select_word();
                     }
-                    Some(i) => {
+                    Some(i) if editable(design, i) => {
                         // Into the point editor.
                         *selection = vec![i];
                         self.nodes.clear();
                         *tool = Tool::Nodes;
                     }
+                    Some(i) => *selection = design.with_group(i),
                     None if design.is_empty() || selection.is_empty() => self.pending_zoom = Some(ZoomTarget::Bed),
                     None => {}
                 },
@@ -1337,8 +1339,9 @@ enum NodeHit {
 }
 
 /// Text keeps its letters: its points can't be edited (convert it first).
-fn editable(design: &Design, obj: usize) -> bool {
-    design.objects.get(obj).is_some_and(|o| !matches!(o.kind, Kind::Text { .. }))
+/// Whether the point editor works on the object (not on text or images).
+pub fn editable(design: &Design, obj: usize) -> bool {
+    design.objects.get(obj).is_some_and(|o| !matches!(o.kind, Kind::Text { .. } | Kind::Image { .. }))
 }
 
 /// Change nodes (in design coordinates) of paths; shapes become paths first.
@@ -1489,14 +1492,22 @@ fn badge(painter: &egui::Painter, at: Pos2, text: &str, fill: Color32, color: Co
 const MAX_PREVIEW_LINES: i32 = 400;
 
 fn draw_design(painter: &egui::Painter, scene: &Scene, design: &Design, zoom: f32, to_screen: &impl Fn(Pt) -> Pos2) {
-    // Engrave layers: hatch lines at the real spacing when zoomed in, thinned
-    // out so they stay a few pixels apart when zoomed out.
-    for (li, layer) in design.layers.iter().enumerate().filter(|(_, l)| l.action == Action::Do(Operation::Engrave)) {
+    // Images first, under everything else.
+    for o in &design.objects {
+        if let Kind::Image { image, look } = &o.kind {
+            let skipped = design.layers.iter().any(|l| l.color == o.color && l.action == Action::Skip);
+            draw_image(painter, o, image, look, skipped, to_screen);
+        }
+    }
+    // Engrave layers (and shapes in Photo layers): hatch lines at the real
+    // spacing when zoomed in, thinned out so they stay a few pixels apart
+    // when zoomed out.
+    for (li, layer) in design.layers.iter().enumerate().filter(|(_, l)| matches!(l.action, Action::Do(Operation::Engrave | Operation::Photo))) {
         let interval_mm = match layer.resolve(scene.material) {
             Ok(Some((_, s))) => s.line_interval_mm,
             _ => PREVIEW_LINE_INTERVAL_MM,
         };
-        let (outlines, shapes) = design.layer_fill_um(layer.color);
+        let (outlines, shapes) = design.layer_fill_um(layer.color, false);
         let Some((y0, y1)) = outlines.iter().flatten().fold(None, |acc: Option<(i32, i32)>, p| Some(acc.map_or((p.1, p.1), |(lo, hi)| (lo.min(p.1), hi.max(p.1))))) else {
             continue;
         };
@@ -1520,6 +1531,42 @@ fn draw_design(painter: &egui::Painter, scene: &Scene, design: &Design, zoom: f3
             painter.add(Shape::line(pl.into_iter().map(to_screen).collect(), Stroke::new(1.4, color)));
         }
     }
+}
+
+/// Longest side of an image's texture on the canvas, pixels.
+const IMAGE_PREVIEW_PX: u32 = 1024;
+
+/// An image object as a textured quad (follows rotation and mirroring),
+/// showing the greys it will be engraved with.
+fn draw_image(painter: &egui::Painter, o: &Object, image: &ImageData, look: &ImageLook, skipped: bool, to_screen: &impl Fn(Pt) -> Pos2) {
+    // One texture per image, remade when its look changes.
+    static TEXTURES: std::sync::Mutex<Vec<(usize, ImageLook, egui::TextureHandle)>> = std::sync::Mutex::new(Vec::new());
+    let mut textures = TEXTURES.lock().unwrap();
+    let cached = textures.iter().find(|(k, l, _)| *k == image.key() && l == look).map(|(_, _, t)| t.clone());
+    let texture = cached.or_else(|| {
+        let grey = image.grey()?;
+        let (w, h) = grey.dimensions();
+        let k = (IMAGE_PREVIEW_PX as f64 / w.max(h) as f64).min(1.0);
+        let (tw, th) = (((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1));
+        let small = if k < 1.0 { image::imageops::thumbnail(&*grey, tw, th) } else { (*grey).clone() };
+        let pixels = small.pixels().map(|p| look.preview(p[0])).collect::<Vec<u8>>();
+        let img = egui::ColorImage::from_gray([tw as usize, th as usize], &pixels);
+        let t = painter.ctx().load_texture(format!("image-{}", image.key()), img, egui::TextureOptions::LINEAR);
+        textures.retain(|(k, _, _)| *k != image.key());
+        textures.push((image.key(), *look, t.clone()));
+        Some(t)
+    });
+    drop(textures);
+    let Some(texture) = texture else { return };
+    let tint = if skipped { Color32::from_white_alpha(64) } else { Color32::WHITE };
+    let corners = [(0.0, 0.0), (o.w, 0.0), (o.w, o.h), (0.0, o.h)];
+    let uvs = [Pos2::new(0.0, 0.0), Pos2::new(1.0, 0.0), Pos2::new(1.0, 1.0), Pos2::new(0.0, 1.0)];
+    let mut mesh = egui::Mesh::with_texture(texture.id());
+    for (c, uv) in corners.into_iter().zip(uvs) {
+        mesh.vertices.push(egui::epaint::Vertex { pos: to_screen(o.to_world(c)), uv, color: tint });
+    }
+    mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+    painter.add(Shape::mesh(mesh));
 }
 
 /// An opened job file, starting at the job anchor.
