@@ -30,7 +30,8 @@
   <a href="#when-something-doesnt-work">Help</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#development">Development</a> ·
-  <a href="#credits">Credits</a>
+  <a href="#credits">Credits</a> ·
+  <a href="#licence">Licence</a>
 </p>
 
 <br>
@@ -259,7 +260,13 @@ app's structure is in [`fokus/README.md`](fokus/README.md), about the protocol i
   under the SIL Open Font License ([`fokus/fonts/LICENSE.inter`](fokus/fonts/LICENSE.inter)).
 - [Lucide](https://lucide.dev) icons, under the ISC License
   ([`fokus/icons/LICENSE.lucide`](fokus/icons/LICENSE.lucide)).
-- [MeerK40t](https://github.com/meerk40t/meerk40t), whose Ruida driver much of the protocol work
-  is based on.
+- [MeerK40t](https://github.com/meerk40t/meerk40t) (MIT License), whose Ruida driver much of
+  the protocol work is based on.
 - Built with [egui](https://github.com/emilk/egui), [usvg / resvg](https://github.com/linebender/resvg)
   and [serialport](https://github.com/serialport/serialport-rs).
+
+## Licence
+
+Fokus is free software under your choice of the [MIT License](LICENSE-MIT) or the
+[Apache License 2.0](LICENSE-APACHE). Use it, change it and pass it on; keep the copyright notice.
+Contributions are accepted under the same terms.

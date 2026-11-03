@@ -27,7 +27,7 @@ rm -rf "${out:?}/$name" "$out/$name".* "$out/$name"-setup.*
 case "$target" in
   *windows*)
     mkdir -p "$out/$name"
-    cp "$bin_dir/fokus.exe" "$root/README.md" "$out/$name/"
+    cp "$bin_dir/fokus.exe" "$root/README.md" "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$out/$name/"
     (cd "$out" && 7z a -tzip "$name.zip" "$name" >/dev/null)
     # The installer (Inno Setup 6 or newer; ISCC on PATH or in Program Files).
     iscc="$(command -v iscc || ls "/c/Program Files (x86)/Inno Setup "*/ISCC.exe "/c/Program Files/Inno Setup "*/ISCC.exe 2>/dev/null | tail -1 || true)"
@@ -83,7 +83,7 @@ case "$target" in
     ;;
   *linux*)
     mkdir -p "$out/$name"
-    cp "$bin_dir/fokus" "$root/README.md" "$root/packaging/linux/fokus.desktop" "$out/$name/"
+    cp "$bin_dir/fokus" "$root/README.md" "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$root/packaging/linux/fokus.desktop" "$out/$name/"
     cp "$root/assets/brand/icon/fokus-256.png" "$out/$name/fokus.png"
     tar -C "$out" -czf "$out/$name.tar.gz" "$name"
     # An AppImage: one file that runs on most distributions. GTK and udev come from the system.

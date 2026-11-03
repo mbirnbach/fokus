@@ -43,6 +43,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#Source}\fokus.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Source}\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Source}\LICENSE-MIT"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Source}\LICENSE-APACHE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Fokus"; Filename: "{app}\fokus.exe"
