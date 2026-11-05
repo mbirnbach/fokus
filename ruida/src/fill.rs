@@ -61,9 +61,15 @@ fn crossings(polys: &[Vec<(i32, i32)>], y: f64) -> Vec<(f64, i32)> {
 /// Spans of one shape.
 fn shape_spans(polys: &[Vec<(i32, i32)>], rule: FillRule, y: f64) -> Vec<(f64, f64)> {
     let mut out = Vec::new();
+    crossing_spans(&crossings(polys, y), rule, &mut out);
+    out
+}
+
+/// Add the spans that sorted crossings of one shape cover.
+fn crossing_spans(crossings: &[(f64, i32)], rule: FillRule, out: &mut Vec<(f64, f64)>) {
     let mut winding = 0;
     let mut start = 0.0;
-    for (x, dir) in crossings(polys, y) {
+    for &(x, dir) in crossings {
         let inside = |w: i32| match rule {
             FillRule::EvenOdd => w % 2 != 0,
             FillRule::NonZero => w != 0,
@@ -79,7 +85,6 @@ fn shape_spans(polys: &[Vec<(i32, i32)>], rule: FillRule, y: f64) -> Vec<(f64, f
             _ => {}
         }
     }
-    out
 }
 
 /// Where the shapes cover the line at `y`, united. `shapes` splits `polys`
@@ -96,8 +101,12 @@ pub fn spans_shapes(polys: &[Vec<(i32, i32)>], shapes: &[Shape], y: f64) -> Vec<
     if start < polys.len() {
         all.extend(shape_spans(&polys[start..], FillRule::EvenOdd, y));
     }
+    unite(all)
+}
+
+/// Sorted, non-overlapping spans in whole µm from any spans.
+fn unite(mut all: Vec<(f64, f64)>) -> Vec<(i32, i32)> {
     all.sort_by(|a, b| a.0.total_cmp(&b.0));
-    // Unite overlapping spans.
     let mut merged: Vec<(f64, f64)> = Vec::new();
     for (a, b) in all {
         match merged.last_mut() {
@@ -123,11 +132,62 @@ pub fn scan_shapes(polys: &[Vec<(i32, i32)>], shapes: &[Shape], interval: i32) -
         return Vec::new();
     };
 
+    // Lines from the top down, y_top - i * interval, while above y_min.
+    let y_top = y_max as i64 - (interval / 2) as i64;
+    let interval_i64 = interval as i64;
+    let count = if y_top > y_min as i64 { ((y_top - y_min as i64 - 1).div_euclid(interval_i64) + 1) as usize } else { 0 };
+    let line_y = |i: usize| y_top - i as i64 * interval_i64;
+
+    // Each edge goes straight to the lines it crosses, one shape at a time,
+    // so the work grows with the crossings and not with lines times edges.
+    let mut all: Vec<Vec<(f64, f64)>> = vec![Vec::new(); count];
+    let mut crossed: Vec<Vec<(f64, i32)>> = vec![Vec::new(); count];
+    let mut fill_shape = |polys: &[Vec<(i32, i32)>], rule: FillRule| {
+        let mut touched: Vec<usize> = Vec::new();
+        for poly in polys.iter().filter(|p| p.len() >= 3) {
+            let n = poly.len();
+            for i in 0..n {
+                let (x0, y0) = poly[i];
+                let (x1, y1) = poly[(i + 1) % n];
+                if y0 == y1 {
+                    continue;
+                }
+                // Half-open in y, so a vertex exactly on a line counts once.
+                let (lo, hi) = (y0.min(y1) as i64, y0.max(y1) as i64);
+                let first = (y_top - hi).div_euclid(interval_i64) + 1;
+                let last = (y_top - lo).div_euclid(interval_i64);
+                let (first, last) = (first.max(0), last.min(count as i64 - 1));
+                let dir = if y1 > y0 { 1 } else { -1 };
+                let (fx0, fy0, fx1, fy1) = (x0 as f64, y0 as f64, x1 as f64, y1 as f64);
+                for l in first..=last {
+                    let y = line_y(l as usize) as f64;
+                    if crossed[l as usize].is_empty() {
+                        touched.push(l as usize);
+                    }
+                    crossed[l as usize].push((fx0 + (y - fy0) / (fy1 - fy0) * (fx1 - fx0), dir));
+                }
+            }
+        }
+        for l in touched {
+            crossed[l].sort_by(|a, b| a.0.total_cmp(&b.0));
+            crossing_spans(&crossed[l], rule, &mut all[l]);
+            crossed[l].clear();
+        }
+    };
+    let mut start = 0;
+    for s in shapes {
+        let end = (start + s.len).min(polys.len());
+        fill_shape(&polys[start..end], s.rule);
+        start = end;
+    }
+    if start < polys.len() {
+        fill_shape(&polys[start..], FillRule::EvenOdd);
+    }
+
     let mut lines = Vec::new();
     let mut leftwards = true;
-    let mut y = y_max - interval / 2;
-    while y > y_min {
-        let mut spans = spans_shapes(polys, shapes, y as f64);
+    for (i, spans) in all.into_iter().enumerate() {
+        let mut spans = unite(spans);
         if !spans.is_empty() {
             if leftwards {
                 spans.reverse();
@@ -135,10 +195,9 @@ pub fn scan_shapes(polys: &[Vec<(i32, i32)>], shapes: &[Shape], interval: i32) -
                     *s = (s.1, s.0);
                 }
             }
-            lines.push(ScanLine { y, spans });
+            lines.push(ScanLine { y: line_y(i) as i32, spans });
             leftwards = !leftwards;
         }
-        y -= interval;
     }
     lines
 }
@@ -222,6 +281,43 @@ mod tests {
         assert_eq!(lines[9].y, 50);
         assert_eq!(lines[0].spans, vec![(1_000, 0)]);
         assert_eq!(lines[1].spans, vec![(0, 1_000)]);
+    }
+
+    /// The fast scan gives exactly what asking for every line on its own gives.
+    #[test]
+    fn scanning_matches_line_by_line() {
+        // A wobbly ring and a triangle that overlaps it, with vertices on lines too.
+        let wobble: Vec<(i32, i32)> = (0..60)
+            .map(|i| {
+                let t = i as f64 * std::f64::consts::TAU / 60.0;
+                let r = 8_000.0 + 1_500.0 * (5.0 * t).sin();
+                ((10_000.0 + r * t.cos()).round() as i32, (10_000.0 + r * t.sin()).round() as i32)
+            })
+            .collect();
+        let mut hole = square(8_000, 8_000, 4_000);
+        hole.reverse();
+        let polys = vec![wobble, hole, vec![(0, 950), (15_000, 950), (7_000, 19_950)], square(3_000, 150, 500)];
+        let shapes = [Shape { len: 2, rule: FillRule::NonZero }, Shape { len: 1, rule: FillRule::EvenOdd }];
+        for interval in [100, 150, 333, 1_000] {
+            let lines = scan_shapes(&polys, &shapes, interval);
+            let (y_min, y_max) = polys.iter().flatten().fold((i32::MAX, i32::MIN), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
+            let mut expected = Vec::new();
+            let mut leftwards = true;
+            let mut y = y_max - interval / 2;
+            while y > y_min {
+                let mut spans = spans_shapes(&polys, &shapes, y as f64);
+                if !spans.is_empty() {
+                    if leftwards {
+                        spans.reverse();
+                        spans.iter_mut().for_each(|s| *s = (s.1, s.0));
+                    }
+                    expected.push(ScanLine { y, spans });
+                    leftwards = !leftwards;
+                }
+                y -= interval;
+            }
+            assert_eq!(lines, expected, "interval {interval}");
+        }
     }
 
     #[test]

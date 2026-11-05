@@ -91,6 +91,8 @@ pub struct FokusApp {
     /// A finished .rd job opened for preview.
     job: Option<Job>,
     file_error: Option<String>,
+    /// What the last opened file left out, until dismissed.
+    file_note: Option<String>,
 
     library: Library,
     /// Name of the material chosen for this job.
@@ -152,6 +154,7 @@ impl FokusApp {
             anchor: Anchor::TOP_RIGHT,
             job: None,
             file_error: None,
+            file_note: None,
             library: Library::load(),
             material: None,
             // Our machine: origin top-right (LightBurn "MirrorX").
@@ -222,17 +225,23 @@ impl FokusApp {
         }
     }
 
-    /// Open an SVG or image (added to the design) or an .rd job (preview
+    /// Open an SVG, DXF or image (added to the design) or an .rd job (preview
     /// only). New designs go to the head if known, else near the origin corner.
     fn open_file(&mut self, path: &Path, snap: Option<&Snapshot>) {
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         self.file_error = None;
+        self.file_note = None;
         match ext.as_str() {
-            "svg" | "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp" => {
+            "svg" | "dxf" | "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp" => {
                 let corner = self.new_corner(snap);
                 self.history.checkpoint(&self.design);
                 let added = if ext == "svg" {
                     self.design.import_svg(path, corner)
+                } else if ext == "dxf" {
+                    self.design.import_dxf(path, corner).map(|(new, skipped)| {
+                        self.file_note = (!skipped.is_empty()).then(|| crate::dxf::skipped_note(&skipped));
+                        new
+                    })
                 } else {
                     // Its own colour, so it gets a Photo layer of its own.
                     let used: Vec<[u8; 3]> = self.design.layers.iter().map(|l| l.color).collect();
@@ -265,7 +274,7 @@ impl FokusApp {
     }
 
     fn pick_file(&mut self, snap: Option<&Snapshot>) {
-        let extensions: Vec<&str> = [project::EXTENSION, "svg", "rd"].into_iter().chain(IMAGE_EXTENSIONS).collect();
+        let extensions: Vec<&str> = [project::EXTENSION, "svg", "dxf", "rd"].into_iter().chain(IMAGE_EXTENSIONS).collect();
         if let Some(path) = rfd::FileDialog::new().add_filter(t!("filter-all"), &extensions).pick_file() {
             self.open_file(&path, snap);
         }
@@ -1851,6 +1860,13 @@ impl FokusApp {
         let pal = theme::p();
         let estimates = self.layer_estimates();
         let material = self.material().cloned();
+        if let Some(note) = self.file_note.clone().filter(|_| !self.design.is_empty()) {
+            notice(ui, Icon::Warning, pal.warn, &note);
+            if Btn::new(t!("dismiss")).ghost().height(26.0).show(ui).clicked() {
+                self.file_note = None;
+            }
+            ui.add_space(8.0);
+        }
         let mut select_color = None;
         let mut save_to_material = None;
         let photo: Vec<bool> = self.design.layers.iter().map(|l| self.design.has_images(l.color)).collect();

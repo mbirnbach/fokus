@@ -7,6 +7,7 @@ mod app;
 mod bezier;
 mod canvas;
 mod design;
+mod dxf;
 mod fonts;
 mod i18n;
 mod icons;
@@ -25,7 +26,7 @@ mod widgets;
 
 use eframe::egui;
 
-const USAGE: &str = "usage: fokus [design.svg | image.png | job.rd]\n       fokus design.svg|image.png --export job.rd --material \"Pappelsperrholz 4 mm\" [--anchor top-right|centre] [--dry-run]";
+const USAGE: &str = "usage: fokus [design.svg | design.dxf | image.png | job.rd]\n       fokus design.svg|design.dxf|image.png --export job.rd --material \"Pappelsperrholz 4 mm\" [--anchor top-right|centre] [--dry-run]";
 
 fn main() -> eframe::Result {
     let settings = settings::Settings::load();
@@ -70,6 +71,11 @@ fn export(args: &[std::ffi::OsString]) -> Result<(), String> {
     let input = std::path::Path::new(&args[0]);
     if input.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
         design.import_svg(input, (0.0, 0.0))?;
+    } else if input.extension().is_some_and(|e| e.eq_ignore_ascii_case("dxf")) {
+        let (_, skipped) = design.import_dxf(input, (0.0, 0.0))?;
+        if !skipped.is_empty() {
+            eprintln!("{}", dxf::skipped_note(&skipped));
+        }
     } else {
         design.import_image(input, (0.0, 0.0), [0, 0, 0])?;
     }

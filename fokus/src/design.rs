@@ -556,8 +556,24 @@ impl Design {
 
     fn import_svg_data(&mut self, data: &[u8], name: &str, top_right: Pt) -> Result<Vec<usize>, String> {
         let shapes = svg_shapes(data)?;
+        self.import_shapes(shapes, name, top_right).ok_or_else(|| t!("err-svg-empty"))
+    }
+
+    /// Import a DXF as a group, its top-right corner at `top_right`. Returns
+    /// the new objects' indices and the entity types it left out.
+    pub fn import_dxf(&mut self, path: &Path, top_right: Pt) -> Result<(Vec<usize>, Vec<(String, usize)>), String> {
+        let data = std::fs::read(path).map_err(|e| t!("err-could-not-read", file = path.display().to_string(), error = e.to_string()))?;
+        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let drawing = crate::dxf::read(&data)?;
+        let shapes = drawing.shapes.into_iter().map(|s| Shape { color: s.color, filled: s.filled, even_odd: s.filled, curves: s.curves }).collect();
+        let new = self.import_shapes(shapes, &name, top_right).ok_or_else(|| t!("err-dxf-empty"))?;
+        Ok((new, drawing.skipped))
+    }
+
+    /// Shapes as a group, with the top-right corner of them all at `top_right`.
+    fn import_shapes(&mut self, shapes: Vec<Shape>, name: &str, top_right: Pt) -> Option<Vec<usize>> {
         let all: Vec<SubPath> = shapes.iter().flat_map(|s| s.curves.iter().cloned()).collect();
-        let ((_, y0), (x1, _)) = bezier::bounds(&all, FLATTEN_TOLERANCE_MM).ok_or_else(|| t!("err-svg-empty"))?;
+        let ((_, y0), (x1, _)) = bezier::bounds(&all, FLATTEN_TOLERANCE_MM)?;
         let (dx, dy) = (top_right.0 - x1, top_right.1 - y0);
         let group = self.new_group();
         let first = self.objects.len();
@@ -570,7 +586,7 @@ impl Design {
             self.objects.push(o);
         }
         self.touch();
-        Ok((first..self.objects.len()).collect())
+        Some((first..self.objects.len()).collect())
     }
 
     /// Place an image file with its top-right corner at `top_right`, at
