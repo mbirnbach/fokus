@@ -22,7 +22,7 @@ jobs:
         kind: [tar, appimage]
     steps:
       - name: Graphics without a screen
-        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-vulkan-drivers libgl1-mesa-dri libgtk-3-0 libudev1
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-vulkan-drivers libgl1-mesa-dri libgtk-3-0 libudev1 libxkbcommon-x11-0 libxcursor1 libxi6 libxrandr2
 
       - name: Download
         run: |
