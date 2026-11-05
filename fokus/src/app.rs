@@ -20,7 +20,8 @@ use crate::machine::{Conn, JobKind, JobPhase, Machine, Snapshot};
 use crate::materials::{Library, Material, OpSettings, Operation};
 use crate::project::{self, Project};
 use crate::raster::{ImageLook, ImageMode};
-use crate::t;
+use crate::logfile;
+use crate::{logln, t};
 use crate::testgrid;
 use crate::update::{Status as UpdateStatus, Updater};
 use crate::theme::{self, Weight};
@@ -28,6 +29,8 @@ use crate::widgets::{self, Btn};
 
 const DEFAULT_BED: (f64, f64) = (1000.0, 600.0);
 const PORT_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+/// How much of the log the copied diagnostics carry.
+const DIAGNOSTIC_LOG_LINES: usize = 300;
 /// Image files Fokus opens (as Photo objects).
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
 
@@ -93,6 +96,9 @@ pub struct FokusApp {
     file_error: Option<String>,
     /// What the last opened file left out, until dismissed.
     file_note: Option<String>,
+    logged_file_error: Option<String>,
+    /// When the diagnostics were copied, to say so for a moment.
+    diagnostics_copied: Option<Instant>,
 
     library: Library,
     /// Name of the material chosen for this job.
@@ -155,6 +161,8 @@ impl FokusApp {
             job: None,
             file_error: None,
             file_note: None,
+            logged_file_error: None,
+            diagnostics_copied: None,
             library: Library::load(),
             material: None,
             // Our machine: origin top-right (LightBurn "MirrorX").
@@ -229,6 +237,7 @@ impl FokusApp {
     /// only). New designs go to the head if known, else near the origin corner.
     fn open_file(&mut self, path: &Path, snap: Option<&Snapshot>) {
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        logln!("Opening {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         self.file_error = None;
         self.file_note = None;
         match ext.as_str() {
@@ -620,6 +629,9 @@ impl FokusApp {
         };
         let result = job
             .map(|mut job| {
+                for l in &job {
+                    logln!("Job layer: {:?}, {} mm/s, {}–{} %, {} ×, air {}, {} paths", l.kind, l.speed, l.min_power, l.max_power, l.passes, l.air_assist, l.paths.len());
+                }
                 if kind == JobKind::DryRun {
                     for l in &mut job {
                         l.min_power = 0.0;
@@ -639,7 +651,10 @@ impl FokusApp {
                 }
                 self.save_msg = None;
             }
-            Err(e) => self.save_msg = Some((false, e)),
+            Err(e) => {
+                logln!("Job refused: {e}");
+                self.save_msg = Some((false, e));
+            }
         }
     }
 
@@ -1007,6 +1022,7 @@ impl eframe::App for FokusApp {
     }
 
     fn on_exit(&mut self) {
+        logln!("Fokus closed");
         self.updater.on_exit(self.restart);
     }
 
@@ -1019,6 +1035,12 @@ impl eframe::App for FokusApp {
         let dropped = ui.ctx().input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
         if let Some(path) = dropped {
             self.open_file(&path, Some(&snap));
+        }
+        if self.file_error != self.logged_file_error {
+            if let Some(e) = &self.file_error {
+                logln!("File problem: {e}");
+            }
+            self.logged_file_error = self.file_error.clone();
         }
         self.shortcuts(ui.ctx());
         self.update_title(ui.ctx());
@@ -2242,9 +2264,59 @@ impl FokusApp {
                     ui.add_space(16.0);
                     widgets::section(ui, &t!("section-updates"));
                     widgets::card(ui, |ui| self.updates_card(ui, snap));
+                    ui.add_space(14.0);
+                    widgets::section(ui, &t!("section-help"));
+                    widgets::card(ui, |ui| self.help_card(ui, snap));
                 });
             });
         });
+    }
+
+    /// Settings → Help: everything needed to ask someone about a problem.
+    fn help_card(&mut self, ui: &mut egui::Ui, snap: &Snapshot) {
+        let pal = theme::p();
+        ui.label(RichText::new(t!("help-text")).color(pal.muted).size(12.0));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            // The button says when it worked: the card's end can be out of view.
+            let copied = self.diagnostics_copied.is_some_and(|at| at.elapsed() < Duration::from_secs(4));
+            let button = if copied { Btn::new(t!("help-copied")).icon(Icon::Check) } else { Btn::new(t!("help-copy")).icon(Icon::Copy) };
+            if button.show(ui).clicked() {
+                ui.ctx().copy_text(self.diagnostics(snap));
+                self.diagnostics_copied = Some(Instant::now());
+            }
+            if copied {
+                ui.ctx().request_repaint_after(Duration::from_secs(1));
+            }
+            if Btn::new(t!("help-open-folder")).icon(Icon::FolderOpen).ghost().show(ui).clicked() {
+                open_log_folder();
+            }
+        });
+    }
+
+    /// The state of things and the end of the log, as text to send to someone.
+    fn diagnostics(&self, snap: &Snapshot) -> String {
+        let mut out = format!("Fokus {} on {} {}\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+        out += &format!("Connection: {:?} on {}\n", snap.conn, snap.port.as_deref().unwrap_or("no port"));
+        if let Some(s) = &snap.status {
+            out += &format!("Laser: card {:#x}, {}, bed {:.0} × {:.0} mm, head at {:.1} / {:.1} mm\n", s.card_id, s.state(), s.bed.0, s.bed.1, s.position.0, s.position.1);
+        }
+        if let Some(j) = &snap.job {
+            out += &format!("Job: {:?}, {:?}, {} of {} bytes sent, {:.0} s\n", j.kind, j.phase, j.sent, j.total, j.elapsed().as_secs_f64());
+        }
+        out += &format!("Machine origin on the right: {}\n", self.origin_right);
+        out += &format!("Material: {}\n", self.material.as_deref().unwrap_or("none"));
+        let material = self.material();
+        out += &format!("Design: {} objects, start point {:?}\n", self.design.objects.len(), self.anchor);
+        for l in &self.design.layers {
+            let what = match l.resolve(material) {
+                Ok(Some((op, s))) => format!("{op:?}, {}", s.summary(op)),
+                Ok(None) => "skipped".to_string(),
+                Err(e) => e.message(material),
+            };
+            out += &format!("  Layer #{:02x}{:02x}{:02x}: {what}\n", l.color[0], l.color[1], l.color[2]);
+        }
+        out + "\n--- Log (UTC) ---\n" + &logfile::tail(DIAGNOSTIC_LOG_LINES)
     }
 
     /// Settings → Updates: the version, what the updater is doing, and a switch for it.
@@ -2633,6 +2705,21 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
 }
 
 /// A line of text with an icon in front, in a colour (warnings, results).
+/// Show the log's folder in the file manager.
+fn open_log_folder() {
+    let Some(dir) = logfile::path().and_then(|p| p.parent().map(Path::to_path_buf)) else { return };
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    if let Err(e) = std::process::Command::new(opener).arg(&dir).spawn() {
+        logln!("Could not open the log folder: {e}");
+    }
+}
+
 fn notice(ui: &mut egui::Ui, icon: Icon, color: Color32, text: &str) {
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;

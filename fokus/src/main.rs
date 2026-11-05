@@ -13,6 +13,7 @@ mod i18n;
 mod icons;
 mod job;
 mod kerf;
+mod logfile;
 mod machine;
 mod materials;
 mod paths;
@@ -44,6 +45,8 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    logfile::init();
+    logln!("Fokus {} started on {} {}, language {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, settings.language.as_deref().unwrap_or("from the system"));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Fokus")

@@ -358,6 +358,11 @@ zoom-out = Zoom out
 ## Updates
 
 section-updates = UPDATES
+section-help = HELP
+help-text = Fokus keeps a log of connections, jobs and problems. If something goes wrong, copy the diagnostics and send them along with your question. They contain the log, the laser's state and this design's settings, and no drawings.
+help-copy = Copy diagnostics
+help-open-folder = Show log folder
+help-copied = Copied
 update-after-job = Restart once the job is done.
 update-automatic = Look for updates automatically
 update-check = Check for updates

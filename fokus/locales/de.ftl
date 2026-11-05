@@ -358,6 +358,11 @@ zoom-out = Verkleinern
 ## Updates
 
 section-updates = UPDATES
+section-help = HILFE
+help-text = Fokus führt ein Protokoll über Verbindungen, Aufträge und Probleme. Wenn etwas schiefgeht, kopiere die Diagnose und schick sie mit deiner Frage mit. Sie enthält das Protokoll, den Zustand des Lasers und die Einstellungen dieses Designs, aber keine Zeichnungen.
+help-copy = Diagnose kopieren
+help-open-folder = Protokollordner zeigen
+help-copied = Kopiert
 update-after-job = Neu starten, sobald der Auftrag fertig ist.
 update-automatic = Automatisch nach Updates suchen
 update-check = Nach Updates suchen

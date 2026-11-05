@@ -17,7 +17,7 @@ use ruida::scramble::MAGIC_644X;
 use ruida::sender::JobSender;
 use ruida::serial::SerialTransport;
 
-use crate::t;
+use crate::{logln, t};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_FAILURES: u32 = 3;
@@ -31,6 +31,8 @@ const RECONNECT_FOR: Duration = Duration::from_secs(60);
 const RECONNECT_EVERY: Duration = Duration::from_millis(500);
 /// When Fokus quits, how long to wait for the worker to get a Stop out.
 const QUIT_PATIENCE: Duration = Duration::from_secs(3);
+/// How often the log looks for changes in the connection and the job.
+const LOG_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Conn {
@@ -129,7 +131,9 @@ pub struct Machine {
 impl Machine {
     pub fn new() -> Self {
         let snapshot = Snapshot { conn: Conn::Disconnected, port: None, status: None, updated: None, job: None };
-        Machine { shared: Arc::new(Mutex::new(snapshot)), stop: None, tx: None, worker: None }
+        let shared = Arc::new(Mutex::new(snapshot));
+        log_changes(Arc::downgrade(&shared));
+        Machine { shared, stop: None, tx: None, worker: None }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -204,6 +208,7 @@ impl Machine {
             return Err(t!("err-laser-busy"));
         }
         let tx = self.tx.as_ref().ok_or_else(|| t!("err-not-connected"))?;
+        logln!("Job: sending {kind:?}, {} bytes, about {estimate_s:.0} s", plain.len());
         set_job(&self.shared, Some(JobProgress::new(plain.len(), estimate_s, kind)));
         tx.send(Cmd::Send { plain, estimate_s, kind }).map_err(|_| t!("err-connection-lost"))
     }
@@ -247,6 +252,42 @@ impl Drop for Machine {
             }
         }
     }
+}
+
+/// Write what changes in the connection and the job to the log, on a thread
+/// of its own that only reads: it can't get in the way of a running job. Ends
+/// with the machine.
+fn log_changes(shared: std::sync::Weak<Mutex<Snapshot>>) {
+    thread::spawn(move || {
+        let (mut conn, mut port, mut phase, mut note) = (Conn::Disconnected, None, None, None);
+        let mut known_card = None;
+        while let Some(shared) = shared.upgrade() {
+            let s = shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            drop(shared);
+            if s.conn != conn || s.port != port {
+                logln!("Connection: {:?} on {}", s.conn, s.port.as_deref().unwrap_or("no port"));
+                (conn, port) = (s.conn, s.port);
+            }
+            if let Some(st) = s.status.as_ref().filter(|st| known_card != Some(st.card_id)) {
+                logln!("Laser: card {:#x}, bed {:.0} × {:.0} mm, {}", st.card_id, st.bed.0, st.bed.1, st.state());
+                known_card = Some(st.card_id);
+            }
+            let (now, now_note) = (s.job.as_ref().map(|j| j.phase.clone()), s.job.as_ref().and_then(|j| j.note.clone()));
+            if now != phase {
+                if let (Some(p), Some(j)) = (&now, &s.job) {
+                    logln!("Job: {p:?} after {:.0} s, {} of {} bytes sent", j.elapsed().as_secs_f64(), j.sent, j.total);
+                }
+                phase = now;
+            }
+            if now_note != note {
+                if let Some(n) = &now_note {
+                    logln!("Job: {n}");
+                }
+                note = now_note;
+            }
+            thread::sleep(LOG_INTERVAL);
+        }
+    });
 }
 
 fn set_job(shared: &Mutex<Snapshot>, job: Option<JobProgress>) {
@@ -727,6 +768,24 @@ mod tests {
         }
         plain.push(0xD7);
         plain
+    }
+
+    #[test]
+    fn the_log_tells_what_happened_to_the_connection_and_the_job() {
+        let dir = std::env::temp_dir().join(format!("fokus-machine-log-{}", std::process::id()));
+        let path = dir.join("fokus.log");
+        crate::logfile::log_to(path.clone());
+        let sim = SimHandle::default();
+        let m = machine(&sim);
+        m.start_job(job(), 1.0, JobKind::Job).unwrap();
+        wait_for(&m.shared, |s| s.job.as_ref().is_some_and(|j| j.phase == JobPhase::Finished));
+        // The log looks for changes a few times a second, from its own thread.
+        thread::sleep(LOG_INTERVAL * 3);
+        let text = std::fs::read_to_string(&path).unwrap();
+        for expected in ["Connection: Connected", "Laser: card", "Job: sending Job", "Job: Finished after"] {
+            assert!(text.contains(expected), "{expected} missing in:\n{text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

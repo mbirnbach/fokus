@@ -147,6 +147,11 @@ impl Updater {
         let (status, installer, ctx) = (self.status.clone(), self.installer.clone(), ctx.clone());
         std::thread::spawn(move || {
             let result = run(&install, &status, &installer);
+            match &result {
+                Ok(Some(version)) => crate::logln!("Update: {version} installed, ready for the next start"),
+                Ok(None) => crate::logln!("Update: none needed"),
+                Err(e) => crate::logln!("Update failed: {e}"),
+            }
             *status.lock().unwrap() = match result {
                 Ok(Some(version)) => Status::Ready { version },
                 Ok(None) => Status::UpToDate,

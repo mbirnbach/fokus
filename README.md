@@ -219,11 +219,19 @@ Fokus keeps its settings and your material library here:
 - **Engraving too light or too dark, or a cut doesn't go through:** check the focus first (set it
   with the focus gauge for your material's thickness), then adjust the layer's speed and power.
 
+### Asking for help
+
+*Settings → Help → Copy diagnostics* puts what someone needs to help you on the clipboard: the
+version, the laser's state, this design's settings and the end of the log. Fokus keeps that log,
+`fokus.log`, in its settings folder. It records connections, jobs, opened files, updates and
+crashes, and never your drawings.
+
 ### What has been tested
 
 On our laser: cutting and engraving (also text set in Fokus), sending over USB, start points,
-framing, pause and resume, stop, and reconnecting after the USB cable was pulled. Not yet
-available: photo engraving. Not yet tried on real hardware: the Windows and Linux builds.
+framing, pause and resume, stop, and reconnecting after the USB cable was pulled. Not yet tried
+on our laser: photo engraving, test grids and kerf compensation. Not yet tried with a laser: the
+Windows and Linux builds.
 
 ## How it works
 
