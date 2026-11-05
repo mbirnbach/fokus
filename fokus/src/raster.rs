@@ -201,6 +201,14 @@ pub fn dither(mut ink: Vec<f32>, diffuse: &[bool], cols: usize) -> Vec<bool> {
     on
 }
 
+/// A ramp from white on the left to black on the right, for test fields.
+pub fn grey_ramp() -> ImageData {
+    let img = GrayImage::from_fn(64, 1, |x, _| image::Luma([255 - (x * 255 / 63) as u8]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut png, image::ImageFormat::Png).expect("writing to memory works");
+    ImageData::new(png.into_inner()).expect("the ramp is a valid image")
+}
+
 /// Runs of dots that are on in one row, as (first, last + 1) column pairs.
 pub fn runs(row: &[bool]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();

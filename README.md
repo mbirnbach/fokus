@@ -71,6 +71,9 @@ experience. It replaces LightBurn and LotusCut for everyday jobs.
   keeps following the job.
 - **No laser at hand?** Save the job as an `.rd` file and run it from a USB stick.
 - **Feels at home.** Light and dark mode, English and German, on Windows, macOS and Linux.
+- **Finds the settings for a new material.** *⋮ → Test grid* burns a field for each combination of
+  speed and power. Run it on a scrap piece, then save the best field's settings to the material
+  with one click.
 - **Keeps itself up to date.** New versions download in the background and are there the next
   time you start Fokus.
 

@@ -46,6 +46,7 @@ icons! {
     FolderOpen => "folder-open",
     Fullscreen => "fullscreen",
     Gauge => "gauge",
+    Grid => "grid-3x3",
     Group => "group",
     Hexagon => "hexagon",
     Info => "info",

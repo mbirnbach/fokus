@@ -21,6 +21,7 @@ use crate::materials::{Library, Material, OpSettings, Operation};
 use crate::project::{self, Project};
 use crate::raster::{ImageLook, ImageMode};
 use crate::t;
+use crate::testgrid;
 use crate::update::{Status as UpdateStatus, Updater};
 use crate::theme::{self, Weight};
 use crate::widgets::{self, Btn};
@@ -106,6 +107,8 @@ pub struct FokusApp {
     /// line spacing µm, design revision); filling is too slow for every frame.
     length_cache: HashMap<([u8; 3], i32, u64), (f64, usize)>,
     prepare_open: bool,
+    /// The test grid dialog, while open.
+    test_grid: Option<testgrid::Spec>,
     checklist: [bool; CHECKLIST],
     /// Result of the last save: (ok, message).
     save_msg: Option<(bool, String)>,
@@ -160,6 +163,7 @@ impl FokusApp {
             library_filter: String::new(),
             length_cache: HashMap::new(),
             prepare_open: false,
+            test_grid: None,
             checklist: [false; CHECKLIST],
             save_msg: None,
             project_path: None,
@@ -206,6 +210,18 @@ impl FokusApp {
         }
     }
 
+    /// Where new things go (their top-right corner): next to what's already
+    /// there, else at the head if known, else near the origin corner.
+    fn new_corner(&self, snap: Option<&Snapshot>) -> Pt {
+        let bed = snap.map(|s| self.bed(s)).unwrap_or(DEFAULT_BED);
+        let head = snap.and_then(|s| s.status.as_ref()).map(|s| s.position);
+        match (head, self.design.bounds()) {
+            (_, Some(((x0, y0), _))) => (x0 - 5.0, y0),
+            (Some(h), None) => self.to_view(bed, h),
+            (None, None) => self.to_view(bed, (10.0, 10.0)),
+        }
+    }
+
     /// Open an SVG or image (added to the design) or an .rd job (preview
     /// only). New designs go to the head if known, else near the origin corner.
     fn open_file(&mut self, path: &Path, snap: Option<&Snapshot>) {
@@ -213,14 +229,7 @@ impl FokusApp {
         self.file_error = None;
         match ext.as_str() {
             "svg" | "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp" => {
-                let bed = snap.map(|s| self.bed(s)).unwrap_or(DEFAULT_BED);
-                let head = snap.and_then(|s| s.status.as_ref()).map(|s| s.position);
-                let corner = match (head, self.design.bounds()) {
-                    // Next to what's already there.
-                    (_, Some(((x0, y0), _))) => (x0 - 5.0, y0),
-                    (Some(h), None) => self.to_view(bed, h),
-                    (None, None) => self.to_view(bed, (10.0, 10.0)),
-                };
+                let corner = self.new_corner(snap);
                 self.history.checkpoint(&self.design);
                 let added = if ext == "svg" {
                     self.design.import_svg(path, corner)
@@ -411,6 +420,110 @@ impl FokusApp {
             }
             None => {}
         }
+    }
+
+    /// The test grid dialog: what to test, and the range of values.
+    fn test_grid_modal(&mut self, ctx: &egui::Context, snap: &Snapshot) {
+        let (Some(mut spec), Some(material)) = (self.test_grid.clone(), self.material().cloned()) else {
+            self.test_grid = None;
+            return;
+        };
+        let pal = theme::p();
+        let problem = spec.problem(&self.design);
+        let mut create = false;
+        let mut cancel = false;
+        let modal = egui::Modal::new(egui::Id::unique("test-grid")).frame(modal_frame()).show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(RichText::new(t!("grid-title", material = material.name.clone())).size(18.0).semibold());
+            ui.add_space(2.0);
+            ui.label(RichText::new(t!("grid-text")).color(pal.muted));
+            ui.add_space(12.0);
+            let op = spec.op;
+            widgets::segmented(ui, &mut spec.op, &Operation::ALL.map(|o| (o, o.label())));
+            if spec.op != op {
+                spec = testgrid::Spec { labels: spec.labels, cols: spec.cols, rows: spec.rows, cell_mm: spec.cell_mm, gap_mm: spec.gap_mm, ..testgrid::Spec::new(&material, spec.op) };
+            }
+            ui.add_space(10.0);
+            egui::Grid::new("grid-fields").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                let range = |ui: &mut egui::Ui, from: egui::DragValue, to: egui::DragValue| {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([96.0, 24.0], from);
+                        ui.label(RichText::new("–").color(pal.muted));
+                        ui.add_sized([96.0, 24.0], to);
+                    });
+                };
+                widgets::field_label(ui, &t!("speed"));
+                let top = spec.speed.1;
+                range(ui, egui::DragValue::new(&mut spec.speed.0).range(1.0..=top).suffix(" mm/s").speed(1.0), egui::DragValue::new(&mut spec.speed.1).range(1.0..=2000.0).suffix(" mm/s").speed(1.0));
+                ui.end_row();
+                widgets::field_label(ui, &t!("power"));
+                let top = spec.power.1;
+                range(ui, egui::DragValue::new(&mut spec.power.0).range(1.0..=top).suffix(" %").speed(0.5), egui::DragValue::new(&mut spec.power.1).range(1.0..=100.0).suffix(" %").speed(0.5));
+                ui.end_row();
+                widgets::field_label(ui, &t!("grid-fields"));
+                ui.horizontal(|ui| {
+                    ui.add_sized([62.0, 24.0], egui::DragValue::new(&mut spec.cols).range(1..=10).suffix(" ×")).on_hover_text(t!("grid-cols-hint"));
+                    ui.add_sized([62.0, 24.0], egui::DragValue::new(&mut spec.rows).range(1..=10)).on_hover_text(t!("grid-rows-hint"));
+                });
+                ui.end_row();
+                widgets::field_label(ui, &t!("grid-size"));
+                ui.horizontal(|ui| {
+                    ui.add_sized([96.0, 24.0], egui::DragValue::new(&mut spec.cell_mm).range(3.0..=50.0).suffix(" mm").speed(0.5));
+                    widgets::field_label(ui, &t!("grid-gap"));
+                    ui.add_sized([70.0, 24.0], egui::DragValue::new(&mut spec.gap_mm).range(0.0..=20.0).suffix(" mm").speed(0.5));
+                });
+                ui.end_row();
+                if spec.op.uses_line_interval() {
+                    widgets::field_label(ui, &t!("line-spacing"));
+                    let min = if spec.op == Operation::Photo { MIN_PHOTO_INTERVAL_MM } else { 0.01 };
+                    ui.add_sized([96.0, 24.0], egui::DragValue::new(&mut spec.line_interval_mm).range(min..=1.0).suffix(" mm").speed(0.005).max_decimals(3));
+                    ui.end_row();
+                }
+                widgets::field_label(ui, &t!("passes"));
+                ui.add_sized([62.0, 24.0], egui::DragValue::new(&mut spec.passes).range(1..=10));
+                ui.end_row();
+                widgets::field_label(ui, &t!("air-assist"));
+                toggle(ui, &mut spec.air_assist);
+                ui.end_row();
+                widgets::field_label(ui, &t!("grid-labels"));
+                toggle(ui, &mut spec.labels);
+                ui.end_row();
+            });
+            ui.add_space(10.0);
+            let (w, h) = spec.size();
+            ui.label(RichText::new(t!("grid-summary", fields = (spec.cols * spec.rows).to_string(), width = format!("{w:.0}"), height = format!("{h:.0}"))).color(pal.muted));
+            if let Some(p) = &problem {
+                ui.add_space(6.0);
+                notice(ui, Icon::Warning, pal.err, p);
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if Btn::new(t!("cancel")).show(ui).clicked() {
+                    cancel = true;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add_enabled_ui(problem.is_none(), |ui| Btn::new(t!("grid-create")).icon(Icon::Grid).primary().show(ui)).inner.clicked() {
+                        create = true;
+                    }
+                });
+            });
+        });
+        if create {
+            let corner = self.new_corner(Some(snap));
+            self.history.checkpoint(&self.design);
+            match testgrid::add(&mut self.design, &spec, corner, &material) {
+                Ok(new) => {
+                    self.job = None;
+                    self.selection = new;
+                    self.set_tool(Tool::Select);
+                    self.canvas.zoom_to(ZoomTarget::Design);
+                }
+                Err(e) => self.file_error = Some(e),
+            }
+        }
+        // Not on a click beside the dialog: that would lose the values typed in.
+        let escape = modal.is_top_modal && !modal.any_popup_open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        self.test_grid = if create || cancel || escape { None } else { Some(spec) };
     }
 
     /// Closing while the laser works: stop the job first, or stay.
@@ -738,7 +851,7 @@ impl FokusApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.prepare_open {
+        if self.prepare_open || self.test_grid.is_some() {
             return;
         }
         // While text is typed on the canvas it has the keyboard, but undo
@@ -960,6 +1073,7 @@ impl eframe::App for FokusApp {
         self.settings_window(ui.ctx(), &snap);
         self.library_window(ui.ctx());
         self.prepare_modal(ui.ctx(), &snap);
+        self.test_grid_modal(ui.ctx(), &snap);
         self.unsaved_modal(ui.ctx());
         self.quit_job_modal(ui.ctx());
 
@@ -1026,6 +1140,14 @@ impl FokusApp {
                 ui.add_enabled_ui(can_export, |ui| {
                     if widgets::menu_item(ui, Some(Icon::FileDown), &t!("menu-export"), "").clicked() {
                         self.save_job();
+                    }
+                });
+                let material = self.material().cloned();
+                ui.add_enabled_ui(material.is_some(), |ui| {
+                    let item = widgets::menu_item(ui, Some(Icon::Grid), &t!("menu-test-grid"), "").on_disabled_hover_text(t!("menu-test-grid-hint"));
+                    if let (true, Some(m)) = (item.clicked(), &material) {
+                        let op = if m.cut.is_some() { Operation::Cut } else { Operation::Engrave };
+                        self.test_grid = Some(testgrid::Spec::new(m, op));
                     }
                 });
             });
@@ -1730,6 +1852,7 @@ impl FokusApp {
         let estimates = self.layer_estimates();
         let material = self.material().cloned();
         let mut select_color = None;
+        let mut save_to_material = None;
         let photo: Vec<bool> = self.design.layers.iter().map(|l| self.design.has_images(l.color)).collect();
         for (idx, layer) in self.design.layers.iter_mut().enumerate() {
             widgets::card(ui, |ui| {
@@ -1740,21 +1863,34 @@ impl FokusApp {
                     if swatch.on_hover_text(t!("select-layer")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         select_color = Some(layer.color);
                     }
-                    ui.label(RichText::new(theme::color_name(layer.color)).semibold());
+                    ui.label(RichText::new(layer.label.clone().unwrap_or_else(|| theme::color_name(layer.color))).semibold());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // A test field: its settings can become the material's.
+                        if let (Some(op), Some(s), Some(m)) = (layer.test_cell, &layer.adjusted, &material) {
+                            if m.settings(op) == Some(s) {
+                                let (r, resp) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                                icons::paint(ui.painter(), r, Icon::Check, pal.accent);
+                                resp.on_hover_text(t!("grid-saved", material = m.name.clone(), operation = op.label()));
+                            } else if widgets::icon_button(ui, Icon::Save, t!("grid-save", material = m.name.clone(), operation = op.label())).clicked() {
+                                save_to_material = Some((op, s.clone()));
+                            }
+                        }
                         if let Some(t) = estimates[idx].as_ref().map(|(_, _, t)| *t) {
                             ui.label(RichText::new(fmt_duration(t)).color(pal.muted).size(12.0).medium());
                         }
                     });
                 });
                 let before = layer.action;
-                if photo[idx] {
+                if let Some(op) = layer.test_cell {
+                    // A test field only burns its own settings, or not at all.
+                    widgets::segmented(ui, &mut layer.action, &[(Action::Do(op), op.label()), (Action::Skip, t!("action-skip"))]);
+                } else if photo[idx] {
                     // Images can only be engraved as photos.
                     widgets::segmented(ui, &mut layer.action, &[(Action::Do(Operation::Photo), Operation::Photo.label()), (Action::Skip, t!("action-skip"))]);
                 } else {
                     widgets::segmented(ui, &mut layer.action, &[(Action::Do(Operation::Cut), Operation::Cut.label()), (Action::Do(Operation::Mark), Operation::Mark.label()), (Action::Do(Operation::Engrave), Operation::Engrave.label()), (Action::Skip, t!("action-skip"))]);
                 }
-                if layer.action != before {
+                if layer.action != before && layer.test_cell.is_none() {
                     layer.adjusted = None;
                 }
                 match layer.resolve(material.as_ref()) {
@@ -1767,6 +1903,8 @@ impl FokusApp {
                     Ok(None) => {
                         ui.label(RichText::new(t!("not-lasered")).color(pal.muted).size(12.0));
                     }
+                    // Its label already says what it burns.
+                    Ok(Some(_)) if layer.test_cell.is_some() => {}
                     Ok(Some((op, s))) => {
                         let title = if layer.adjusted.is_some() { t!("adjusted", summary = s.summary(op)) } else { s.summary(op) };
                         egui::CollapsingHeader::new(RichText::new(title).size(12.0).color(pal.muted)).id_salt(("adjust", idx)).show(ui, |ui| {
@@ -1782,6 +1920,14 @@ impl FokusApp {
                 }
             });
             ui.add_space(8.0);
+        }
+        if let Some((op, s)) = save_to_material {
+            if let Some(m) = self.material.as_ref().and_then(|n| self.library.materials.iter_mut().find(|m| &m.name == n)) {
+                *m.settings_mut(op) = Some(s);
+                // It has just been tried on the machine.
+                m.verified = true;
+                self.library.save();
+            }
         }
         if let Some(c) = select_color {
             self.selection = (0..self.design.objects.len()).filter(|&i| self.design.objects[i].color == c).collect();

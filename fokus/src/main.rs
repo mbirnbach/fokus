@@ -17,6 +17,7 @@ mod paths;
 mod project;
 mod raster;
 mod settings;
+mod testgrid;
 mod textedit;
 mod theme;
 mod update;

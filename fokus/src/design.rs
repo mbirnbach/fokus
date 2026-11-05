@@ -437,6 +437,12 @@ pub struct LayerSettings {
     pub action: Action,
     /// Hand-tuned values replacing the material's for this layer.
     pub adjusted: Option<OpSettings>,
+    /// Shown instead of the colour's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// A field of a test grid, testing this operation (see `testgrid`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_cell: Option<Operation>,
 }
 
 /// Why a layer can't be lasered as set up.
@@ -461,7 +467,7 @@ impl LayerProblem {
 
 impl LayerSettings {
     fn new(color: [u8; 3], op: Operation) -> Self {
-        LayerSettings { color, action: Action::Do(op), adjusted: None }
+        LayerSettings { color, action: Action::Do(op), adjusted: None, label: None, test_cell: None }
     }
 
     /// The settings this layer will be lasered with.
