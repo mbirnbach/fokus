@@ -2421,7 +2421,7 @@ impl FokusApp {
                                 ui.label(RichText::new(op.label()).semibold());
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     if toggle(ui, &mut on).changed() {
-                                        *slot = on.then(|| OpSettings { speed: 100.0, min_power: 20.0, max_power: 20.0, passes: 1, air_assist: true, line_interval_mm: if op.uses_line_interval() { 0.1 } else { 0.0 } });
+                                        *slot = on.then(|| OpSettings { speed: 100.0, min_power: 20.0, max_power: 20.0, passes: 1, air_assist: true, kerf_mm: 0.0, line_interval_mm: if op.uses_line_interval() { 0.1 } else { 0.0 } });
                                         changed = true;
                                     }
                                 });
@@ -2689,6 +2689,11 @@ fn settings_editor(ui: &mut egui::Ui, op: Operation, s: &mut OpSettings, id: imp
             }
             let min = if op == Operation::Photo { MIN_PHOTO_INTERVAL_MM } else { 0.01 };
             changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.line_interval_mm).range(min..=1.0).suffix(" mm").speed(0.005).max_decimals(3)).changed();
+            ui.end_row();
+        }
+        if op == Operation::Cut {
+            row(ui, Icon::Scan, t!("kerf"));
+            changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.kerf_mm).range(0.0..=1.0).suffix(" mm").speed(0.005).max_decimals(3)).on_hover_text(t!("kerf-hint")).changed();
             ui.end_row();
         }
         row(ui, Icon::Repeat, t!("passes"));

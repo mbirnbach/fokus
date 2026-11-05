@@ -77,6 +77,8 @@ experience. It replaces LightBurn and LotusCut for everyday jobs.
 - **Finds the settings for a new material.** *⋮ → Test grid* burns a field for each combination of
   speed and power. Run it on a scrap piece, then save the best field's settings to the material
   with one click.
+- **Parts that fit.** Set a material's kerf, the width of the line the beam burns away, and parts
+  and holes come out at their drawn size, for press fits and finger joints.
 - **Keeps itself up to date.** New versions download in the background and are there the next
   time you start Fokus.
 

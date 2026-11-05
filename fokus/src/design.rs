@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bezier::{self, SubPath};
 use crate::fonts::{self, Ink};
+use crate::kerf;
 use crate::materials::{Material, OpSettings, Operation};
 use crate::paths;
 use crate::raster::{self, ImageData, ImageLook, ImageMode};
@@ -917,6 +918,8 @@ impl Design {
             Operation::Mark => 1,
             Operation::Cut => 2,
         });
+        // Parts and holes follow from all that is cut, across layers.
+        let nesting = layers.iter().any(|(_, op, s)| *op == Operation::Cut && s.kerf_mm > 0.0).then(|| kerf::Nesting::new(layers.iter().filter(|(_, op, _)| *op == Operation::Cut).flat_map(|(l, _, _)| self.layer_paths(l.color))));
         // Each layer's paths are ordered from where the previous one ended
         // (the head, for the first), innermost shapes first.
         let mut pos = (0, 0);
@@ -929,7 +932,11 @@ impl Design {
                 } else if op == Operation::Photo {
                     (self.layer_spans(l.color, s.line_interval_mm, to_ctrl)?, Vec::new())
                 } else {
-                    let paths: Vec<Vec<(i32, i32)>> = self.layer_paths(l.color).into_iter().map(|pl| pl.into_iter().map(to_ctrl).collect()).collect();
+                    let mut outlines = self.layer_paths(l.color);
+                    if let (Operation::Cut, true, Some(nesting)) = (op, s.kerf_mm > 0.0, &nesting) {
+                        outlines = kerf::compensate(outlines, s.kerf_mm as f64, nesting);
+                    }
+                    let paths: Vec<Vec<(i32, i32)>> = outlines.into_iter().map(|pl| pl.into_iter().map(to_ctrl).collect()).collect();
                     let ordered = paths::order(paths, pos);
                     if let Some(&last) = ordered.last().and_then(|p| p.last()) {
                         pos = last;
@@ -1447,6 +1454,32 @@ mod tests {
         // Engrave, photo, cut: the photo burns 10 lines of 1 mm.
         assert_eq!(tp.layers.len(), 3);
         assert!((tp.layers[&1].cut_mm - 10.0).abs() < 1e-6, "{}", tp.layers[&1].cut_mm);
+    }
+
+    #[test]
+    fn kerf_only_moves_cuts_and_keeps_holes_cut_first() {
+        let mut d = Design::default();
+        d.add(Object::new(Kind::Rect { radius: 0.0 }, (0.0, 0.0, 20.0, 20.0), [0, 0, 0]));
+        d.add(Object::new(Kind::Ellipse, (5.0, 5.0, 10.0, 10.0), [0, 0, 0]));
+        d.add(Object::new(Kind::Rect { radius: 0.0 }, (0.0, 30.0, 20.0, 20.0), [224, 49, 49]));
+        d.layers[1].action = Action::Do(Operation::Mark);
+        let mut m = plywood();
+        m.cut.as_mut().unwrap().kerf_mm = 0.2;
+        m.mark = m.cut.clone();
+        let job = d.to_job(Some(&m), true, Anchor::TOP_RIGHT).unwrap();
+        let width = |p: &Vec<(i32, i32)>| p.iter().map(|q| q.0).max().unwrap() - p.iter().map(|q| q.0).min().unwrap();
+        // The mark stays on the line, whatever its settings say.
+        assert_eq!(width(&job[0].paths[0]), 20_000);
+        // Hole first and smaller, then the part, larger.
+        assert!((width(&job[1].paths[0]) - 9_800).abs() < 10, "{}", width(&job[1].paths[0]));
+        assert!((width(&job[1].paths[1]) - 20_200).abs() < 10, "{}", width(&job[1].paths[1]));
+        // No kerf set: exactly as drawn.
+        m.cut.as_mut().unwrap().kerf_mm = 0.0;
+        let plain = d.to_job(Some(&m), true, Anchor::TOP_RIGHT).unwrap();
+        assert_eq!(width(&plain[1].paths[1]), 20_000);
+        // It still makes a job the controller can read.
+        let tp = ruida::job::Toolpath::from_records(&ruida::command::parse(&ruida::writer::write_plain(&job).unwrap()));
+        assert_eq!(tp.unknown_commands, 0);
     }
 
     #[test]

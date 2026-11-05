@@ -12,6 +12,7 @@ mod fonts;
 mod i18n;
 mod icons;
 mod job;
+mod kerf;
 mod machine;
 mod materials;
 mod paths;

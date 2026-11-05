@@ -60,6 +60,9 @@ pub struct OpSettings {
     /// Engrave / photo line spacing in mm.
     #[serde(default)]
     pub line_interval_mm: f32,
+    /// Cut: width of the line the beam burns away, mm; 0 = cut on the drawn line.
+    #[serde(default)]
+    pub kerf_mm: f32,
 }
 
 impl OpSettings {
@@ -75,6 +78,9 @@ impl OpSettings {
         }
         if op.uses_line_interval() && self.line_interval_mm > 0.0 {
             s.push_str(&t!("settings-summary-lines", interval = self.line_interval_mm.to_string()));
+        }
+        if op == Operation::Cut && self.kerf_mm > 0.0 {
+            s.push_str(&t!("settings-summary-kerf", kerf = self.kerf_mm.to_string()));
         }
         s
     }
@@ -118,7 +124,7 @@ impl Material {
         Material {
             name: t!("material-new"),
             thickness_mm: 3.0,
-            cut: Some(OpSettings { speed: 20.0, min_power: 50.0, max_power: 50.0, passes: 1, air_assist: true, line_interval_mm: 0.0 }),
+            cut: Some(OpSettings { speed: 20.0, min_power: 50.0, max_power: 50.0, passes: 1, air_assist: true, kerf_mm: 0.0, line_interval_mm: 0.0 }),
             mark: None,
             engrave: None,
             photo: None,
@@ -129,7 +135,7 @@ impl Material {
 }
 
 fn op(speed: f64, power: f32, air_assist: bool, line_interval_mm: f32) -> Option<OpSettings> {
-    Some(OpSettings { speed, min_power: power, max_power: power, passes: 1, air_assist, line_interval_mm })
+    Some(OpSettings { speed, min_power: power, max_power: power, passes: 1, air_assist, line_interval_mm, kerf_mm: 0.0 })
 }
 
 /// The vendor's reference sheet, grouped into materials. Each value is as

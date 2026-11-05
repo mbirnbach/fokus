@@ -20,7 +20,7 @@ const LABEL_SIZE: f64 = 3.0;
 const LABEL_W: f64 = 12.0;
 const LABEL_H: f64 = 6.0;
 /// Labels on a material without engrave settings: light, so they don't cut.
-const LABEL_FALLBACK: OpSettings = OpSettings { speed: 300.0, min_power: 20.0, max_power: 20.0, passes: 1, air_assist: true, line_interval_mm: 0.15 };
+const LABEL_FALLBACK: OpSettings = OpSettings { speed: 300.0, min_power: 20.0, max_power: 20.0, passes: 1, air_assist: true, kerf_mm: 0.0, line_interval_mm: 0.15 };
 
 /// What to burn: speeds across the columns, powers down the rows.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +37,8 @@ pub struct Spec {
     pub passes: u32,
     pub air_assist: bool,
     pub line_interval_mm: f32,
+    /// Kept from the material, so saving a field doesn't lose it.
+    pub kerf_mm: f32,
     pub labels: bool,
 }
 
@@ -50,7 +52,7 @@ impl Spec {
             Operation::Engrave => (300.0, 30.0, 0.1),
             Operation::Photo => (500.0, 40.0, DEFAULT_PHOTO_INTERVAL_MM),
         };
-        let base = material.settings(op).cloned().unwrap_or(OpSettings { speed, min_power: power, max_power: power, passes: 1, air_assist: true, line_interval_mm: interval });
+        let base = material.settings(op).cloned().unwrap_or(OpSettings { speed, min_power: power, max_power: power, passes: 1, air_assist: true, kerf_mm: 0.0, line_interval_mm: interval });
         Spec {
             op,
             speed: ((base.speed * 0.5).round().max(1.0), (base.speed * 1.5).round().min(2000.0)),
@@ -62,6 +64,7 @@ impl Spec {
             passes: base.passes,
             air_assist: base.air_assist,
             line_interval_mm: if base.line_interval_mm > 0.0 { base.line_interval_mm } else { interval },
+            kerf_mm: base.kerf_mm,
             labels: true,
         }
     }
@@ -198,7 +201,7 @@ pub fn add(design: &mut Design, spec: &Spec, top_right: Pt, material: &Material)
             let interval = if spec.op.uses_line_interval() { spec.line_interval_mm } else { 0.0 };
             let layer = layer_mut(design, color);
             layer.action = Action::Do(spec.op);
-            layer.adjusted = Some(OpSettings { speed, min_power: power, max_power: power, passes: spec.passes, air_assist: spec.air_assist, line_interval_mm: interval });
+            layer.adjusted = Some(OpSettings { speed, min_power: power, max_power: power, passes: spec.passes, air_assist: spec.air_assist, kerf_mm: spec.kerf_mm, line_interval_mm: interval });
             layer.label = Some(label);
             layer.test_cell = Some(spec.op);
         }
