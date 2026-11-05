@@ -1784,7 +1784,13 @@ impl FokusApp {
         let ready = !self.design.is_empty() && self.material().is_some() && self.design.problems(self.material()).is_empty();
         egui::Panel::bottom("start").frame(Frame::new().fill(pal.panel).inner_margin(Margin { top: 14, ..Margin::ZERO })).show(ui, |ui| self.start_footer(ui, snap, ready));
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        // A fixed area: content that is too wide gets clipped. Otherwise it
+        // changes the panel's width, and with it the canvas and its zoom.
+        let rect = ui.available_rect_before_wrap();
+        ui.advance_cursor_after_rect(rect);
+        let mut area = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+        area.set_clip_rect(rect.intersect(ui.clip_rect()));
+        egui::ScrollArea::vertical().show(&mut area, |ui| {
             widgets::section(ui, &t!("section-material"));
             self.material_picker(ui);
             ui.add_space(18.0);
@@ -1923,7 +1929,7 @@ impl FokusApp {
                     Ok(Some(_)) if layer.test_cell.is_some() => {}
                     Ok(Some((op, s))) => {
                         let title = if layer.adjusted.is_some() { t!("adjusted", summary = s.summary(op)) } else { s.summary(op) };
-                        egui::CollapsingHeader::new(RichText::new(title).size(12.0).color(pal.muted)).id_salt(("adjust", idx)).show(ui, |ui| {
+                        egui::CollapsingHeader::new(RichText::new(title).size(12.0).color(pal.muted)).id_salt(("adjust", idx)).show_unindented(ui, |ui| {
                             let mut edit = s.clone();
                             if settings_editor(ui, op, &mut edit, ("layer", idx)) {
                                 layer.adjusted = Some(edit);
@@ -2669,15 +2675,19 @@ fn settings_editor(ui: &mut egui::Ui, op: Operation, s: &mut OpSettings, id: imp
             ui.label(RichText::new(label).color(pal.muted));
         });
     };
-    egui::Grid::new(id).num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+    // Narrow enough for the layer cards, also with German's long labels.
+    egui::Grid::new(id).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
         row(ui, Icon::Gauge, t!("speed"));
         changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.speed).range(1.0..=2000.0).suffix(" mm/s").speed(0.5)).changed();
         ui.end_row();
         row(ui, Icon::Zap, t!("power"));
         ui.horizontal(|ui| {
-            changed |= ui.add_sized([62.0, 24.0], egui::DragValue::new(&mut s.min_power).range(0.0..=s.max_power).suffix(" %").speed(0.5)).changed();
+            // A DragValue takes its width from here, not from add_sized.
+            ui.spacing_mut().interact_size.x = 50.0;
+            ui.spacing_mut().item_spacing.x = 3.0;
+            changed |= ui.add_sized([50.0, 24.0], egui::DragValue::new(&mut s.min_power).range(0.0..=s.max_power).suffix(" %").speed(0.5)).changed();
             ui.label(RichText::new("–").color(pal.muted));
-            changed |= ui.add_sized([62.0, 24.0], egui::DragValue::new(&mut s.max_power).range(s.min_power..=100.0).suffix(" %").speed(0.5)).changed();
+            changed |= ui.add_sized([50.0, 24.0], egui::DragValue::new(&mut s.max_power).range(s.min_power..=100.0).suffix(" %").speed(0.5)).changed();
         });
         ui.end_row();
         if op.uses_line_interval() {
