@@ -1,0 +1,122 @@
+name: Updater check
+
+# Started by hand (Actions → Updater check → Run workflow). Installs the latest
+# release the way a user would, makes it believe it is old and checks that it
+# updates itself from GitHub. See packaging/UPDATES.md.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  FOKUS_UPDATE_PRETEND_VERSION: 0.0.1
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [tar, appimage]
+    steps:
+      - name: Graphics without a screen
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-vulkan-drivers libgl1-mesa-dri libgtk-3-0 libudev1
+
+      - name: Download
+        run: |
+          gh release download -R "$GITHUB_REPOSITORY" -p '*linux-x86_64*'
+          ls -l
+
+      - name: Update the tar.gz copy
+        if: matrix.kind == 'tar'
+        run: |
+          tar xzf fokus-*-linux-x86_64.tar.gz
+          target="$(echo "$PWD"/fokus-*-linux-x86_64/fokus)"
+          echo "TARGET=$target" >> "$GITHUB_ENV"
+          echo "RUN=$target" >> "$GITHUB_ENV"
+
+      - name: Update the AppImage
+        if: matrix.kind == 'appimage'
+        run: |
+          target="$(echo "$PWD"/fokus-*-linux-x86_64.AppImage)"
+          chmod +x "$target"
+          echo "TARGET=$target" >> "$GITHUB_ENV"
+          echo "RUN=$target" >> "$GITHUB_ENV"
+          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
+
+      - name: Run and watch for the update
+        run: |
+          before="$(stat -c %i "$TARGET")"
+          xvfb-run -a "$RUN" > app.log 2>&1 &
+          for _ in $(seq 1 24); do
+            sleep 5
+            if [ "$(stat -c %i "$TARGET")" != "$before" ]; then
+              echo "Updated: $TARGET was replaced"
+              "$TARGET" --version 2>/dev/null || true
+              [ -x "$TARGET" ] || { echo "not executable after the update"; exit 1; }
+              exit 0
+            fi
+          done
+          echo "No update after 2 minutes"; cat app.log; exit 1
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [zip, installer]
+    steps:
+      - name: Download
+        shell: bash
+        run: |
+          gh release download -R "$GITHUB_REPOSITORY" -p '*windows*'
+          ls -l
+
+      - name: Update the zip copy
+        if: matrix.kind == 'zip'
+        shell: pwsh
+        run: |
+          Expand-Archive (Get-Item fokus-*-windows.zip) -DestinationPath zip
+          $exe = (Get-ChildItem zip -Recurse -Filter fokus.exe).FullName
+          $before = (Get-Item $exe).LastWriteTimeUtc
+          $app = Start-Process $exe -PassThru -RedirectStandardError app.log
+          foreach ($i in 1..24) {
+            Start-Sleep 5
+            if ($app.HasExited) { Write-Host "Fokus exited with $($app.ExitCode)"; Get-Content app.log; exit 1 }
+            if (Test-Path "$exe.old") {
+              Write-Host "Updated: the running exe was moved aside and replaced"
+              Stop-Process $app -Force
+              exit 0
+            }
+          }
+          Write-Host "No update after 2 minutes"; Get-Content app.log; exit 1
+
+      - name: Update the installed copy
+        if: matrix.kind == 'installer'
+        shell: pwsh
+        run: |
+          $setup = (Get-Item fokus-*-windows-setup.exe).FullName
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER' -Wait
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\Fokus'
+          $exe = Join-Path $dir 'fokus.exe'
+          if (-not (Test-Path $exe)) { Write-Host "Not installed in $dir"; exit 1 }
+          $log = Join-Path $dir 'unins000.dat'
+          $before = (Get-Item $log).LastWriteTimeUtc
+          $app = Start-Process $exe -PassThru
+          # The update waits in the temp folder until Fokus closes.
+          $staged = Join-Path $env:TEMP 'fokus-update-*'
+          foreach ($i in 1..24) {
+            Start-Sleep 5
+            if ($app.HasExited) { Write-Host "Fokus exited with $($app.ExitCode)"; exit 1 }
+            if (Get-ChildItem $staged -Recurse -Filter *setup.exe -ErrorAction SilentlyContinue) { break }
+          }
+          if (-not (Get-ChildItem $staged -Recurse -Filter *setup.exe -ErrorAction SilentlyContinue)) { Write-Host "Nothing downloaded after 2 minutes"; exit 1 }
+          Write-Host "Downloaded; closing Fokus so the installer runs"
+          $app.CloseMainWindow() | Out-Null
+          foreach ($i in 1..24) {
+            Start-Sleep 5
+            if ((Get-Item $log).LastWriteTimeUtc -ne $before) { Write-Host "Updated: the installer ran over the installed copy"; exit 0 }
+          }
+          Write-Host "The installer didn't run"; exit 1

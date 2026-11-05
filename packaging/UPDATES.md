@@ -43,3 +43,6 @@ Signing locally: `UPDATE_SIGNING_KEY=$(cat ~/fokus-update-key.txt) scripts/packa
 it updates to the latest release. `FOKUS_UPDATE_URL` points it at another release description (the
 JSON of GitHub's *latest release* API) for a local test. `FOKUS_UPDATE_DEV=1` lets a debug build
 use the updater.
+
+The *Updater check* workflow (Actions → Run workflow) does this on real Windows and Linux runners
+for the latest release: the zip, the installer, the tar.gz and the AppImage.

@@ -336,7 +336,9 @@ fn install_mac(bundle: &Path, dir: &Path, dmg: &[u8]) -> Result<(), String> {
     let image = dir.join("update.dmg");
     let mount = dir.join("mount");
     std::fs::write(&image, dmg).map_err(|e| e.to_string())?;
-    run(Command::new("hdiutil").args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"]).arg(&mount).arg(&image))?;
+    // hdiutil attach is deprecated; macOS versions before diskutil's image command still need it.
+    run(Command::new("diskutil").args(["image", "attach", "--readOnly", "--nobrowse", "--mountPoint"]).arg(&mount).arg(&image))
+        .or_else(|_| run(Command::new("hdiutil").args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"]).arg(&mount).arg(&image)))?;
     let parent = bundle.parent().ok_or("app has no folder")?;
     let staged = parent.join(".Fokus-update.app");
     let copied = (|| {
@@ -347,7 +349,7 @@ fn install_mac(bundle: &Path, dir: &Path, dmg: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_dir_all(&staged);
         run(Command::new("ditto").arg(&app).arg(&staged)).map_err(|e| write_error(parent, e))
     })();
-    let _ = run(Command::new("hdiutil").args(["detach", "-quiet"]).arg(&mount));
+    let _ = run(Command::new("diskutil").arg("eject").arg(&mount));
     copied?;
     let old = parent.join(".Fokus-old.app");
     let _ = std::fs::remove_dir_all(&old);

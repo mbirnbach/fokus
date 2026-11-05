@@ -1,9 +1,19 @@
 name: CI
 
-# Tests on all three systems, started by hand (Actions → CI → Run workflow).
+# Tests on all three systems, for every push to main and every pull request.
 # Releases run the same tests in release.yml before they build.
 on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
+
+# A newer push makes the run for the one before it pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -20,7 +30,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Rust toolchain
         run: rustup update stable && rustup default stable
@@ -29,7 +39,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev libgtk-3-dev libxkbcommon-dev pkg-config fonts-dejavu-core
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
