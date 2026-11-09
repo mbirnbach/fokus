@@ -28,10 +28,10 @@ jobs:
             # Older Ubuntu for a lower glibc requirement, so the build runs on more distributions.
             os: ubuntu-22.04
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           # GitHub no longer offers Intel Mac runners; cross-build on Apple silicon.
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
