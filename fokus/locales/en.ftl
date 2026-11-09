@@ -116,7 +116,6 @@ err-photo-too-large = This photo layer is too large for its line spacing. Make i
 err-svg-unreadable = Not a readable SVG: { $error }
 focus-surface = Set the nozzle height with the focus gauge on the material surface. Refocus every time the material changes.
 focus-thickness = Set the nozzle height with the focus gauge for { $thickness } mm material. Refocus every time the material changes.
-head-label = Laser head
 head-position = Laser head position
 head-position-hint = Before starting, put the head on the { $point } of where the design goes.
 job-failed = Job failed

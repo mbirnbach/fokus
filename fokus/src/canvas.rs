@@ -1102,13 +1102,6 @@ impl Canvas {
             let sq = Rect::from_center_size(c, Vec2::splat(10.0));
             painter.rect_filled(sq, 2.0, pal.ok);
             painter.rect_stroke(sq, 2.0, Stroke::new(1.5, pal.panel), StrokeKind::Outside);
-            // The label goes outside the design, beside the square.
-            let side = |t: i8, len: f32| if t < 0 { -len } else if t > 0 { len } else { 0.0 };
-            let out = Vec2::new(side(scene.anchor.h, 1.0), side(scene.anchor.v, 1.0));
-            let out = if out == Vec2::ZERO { Vec2::new(0.0, -1.0) } else { out };
-            let label = t!("head-label");
-            let w = painter.layout_no_wrap(label.clone(), theme::medium(11.0), pal.panel).size().x + 12.0;
-            badge(&painter, c + Vec2::new(out.x * (w / 2.0 + 10.0), out.y * 18.0), &label, pal.ok, pal.panel);
         }
 
         // Hover hint: the outline of the object under the pointer.

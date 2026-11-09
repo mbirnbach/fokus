@@ -116,7 +116,6 @@ err-photo-too-large = Diese Foto-Ebene ist für ihren Linienabstand zu groß. Ma
 err-svg-unreadable = Keine lesbare SVG-Datei: { $error }
 focus-surface = Stelle die Düsenhöhe mit der Fokuslehre auf der Materialoberfläche ein. Bei jedem Materialwechsel neu fokussieren.
 focus-thickness = Stelle die Düsenhöhe mit der Fokuslehre für { $thickness } mm Material ein. Bei jedem Materialwechsel neu fokussieren.
-head-label = Laserkopf
 head-position = Position des Laserkopfs
 head-position-hint = Setze den Kopf vor dem Start auf die { $point } der Stelle, an die das Design soll.
 job-failed = Auftrag fehlgeschlagen
