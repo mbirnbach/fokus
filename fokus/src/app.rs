@@ -12,12 +12,12 @@ use eframe::egui::{self, Align, Color32, Event, Frame, Key, Layout, Margin, Modi
 use ruida::serial::{list_ports, PortInfo};
 
 use crate::canvas::{Canvas, Edit, Scene, Tool, ZoomTarget};
-use crate::design::{Action, Anchor, Design, History, Kind, LayerProblem, Object, Pt, TextStyle, DEFAULT_PHOTO_INTERVAL_MM, DEFAULT_TEXT_SIZE, MIN_PHOTO_INTERVAL_MM, MIN_SIZE};
+use crate::design::{Action, Anchor, Design, History, Kind, LayerProblem, LayerSettings, Object, Pt, TextStyle, DEFAULT_PHOTO_INTERVAL_MM, DEFAULT_TEXT_SIZE, MIN_PHOTO_INTERVAL_MM, MIN_SIZE};
 use crate::fonts;
 use crate::icons::{self, Icon};
 use crate::job::Job;
 use crate::machine::{Conn, JobKind, JobPhase, Machine, Snapshot};
-use crate::materials::{Library, Material, OpSettings, Operation};
+use crate::materials::{reference_materials, Library, Material, OpSettings, Operation};
 use crate::project::{self, Project};
 use crate::raster::{ImageLook, ImageMode};
 use crate::logfile;
@@ -1930,11 +1930,17 @@ impl FokusApp {
                     // Its label already says what it burns.
                     Ok(Some(_)) if layer.test_cell.is_some() => {}
                     Ok(Some((op, s))) => {
-                        let title = if layer.adjusted.is_some() { t!("adjusted", summary = s.summary(op)) } else { s.summary(op) };
-                        egui::CollapsingHeader::new(RichText::new(title).size(12.0).color(pal.muted)).id_salt(("adjust", idx)).show_unindented(ui, |ui| {
+                        // The material's own values: what the reset buttons go back to.
+                        let base = LayerSettings { adjusted: None, ..layer.clone() }.resolve(material.as_ref()).ok().flatten().map(|(_, b)| b);
+                        // Changed for this job only: said in colour, the library stays as it is.
+                        let (title, color) = if layer.adjusted.is_some() { (t!("adjusted", summary = s.summary(op)), pal.accent) } else { (s.summary(op), pal.muted) };
+                        let header = egui::CollapsingHeader::new(RichText::new(title).size(12.0).color(color)).id_salt(("adjust", idx));
+                        let header = if layer.adjusted.is_some() { header.default_open(true) } else { header };
+                        header.show_unindented(ui, |ui| {
                             let mut edit = s.clone();
-                            if settings_editor(ui, op, &mut edit, ("layer", idx)) {
-                                layer.adjusted = Some(edit);
+                            if settings_editor(ui, op, &mut edit, base.as_ref(), ("layer", idx)) {
+                                // Back on all of the material's values: no longer adjusted.
+                                layer.adjusted = (base.as_ref() != Some(&edit)).then_some(edit);
                             }
                             if layer.adjusted.is_some() && Btn::new(t!("back-to-material")).icon(Icon::Undo).ghost().height(26.0).show(ui).clicked() {
                                 layer.adjusted = None;
@@ -2452,6 +2458,8 @@ impl FokusApp {
                     return;
                 };
                 let old_name = m.name.clone();
+                // The shipped values of a reference material, for its reset buttons.
+                let factory = reference_materials().into_iter().find(|r| r.name == m.name);
                 egui::ScrollArea::vertical().id_salt("matedit").show(ui, |ui| {
                     widgets::field_label(ui, &t!("name"));
                     changed |= ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(f32::INFINITY).font(theme::semibold(16.0)).margin(Margin::symmetric(8, 6))).changed();
@@ -2479,7 +2487,7 @@ impl FokusApp {
                             });
                             if let Some(s) = slot {
                                 ui.add_space(4.0);
-                                changed |= settings_editor(ui, op, s, ("lib", op.label()));
+                                changed |= settings_editor(ui, op, s, factory.as_ref().and_then(|f| f.settings(op)), ("lib", op.label()));
                             } else {
                                 ui.label(RichText::new(t!("op-off")).color(pal.muted).size(12.0));
                             }
@@ -2709,7 +2717,10 @@ fn empty_state(ui: &mut egui::Ui, icon: Icon, text: &str) {
 }
 
 /// Speed / power / passes / air (and line spacing) for one operation.
-fn settings_editor(ui: &mut egui::Ui, op: Operation, s: &mut OpSettings, id: impl std::hash::Hash + std::fmt::Debug) -> bool {
+/// Speed, power and the rest of one operation's settings. With `default`
+/// (the material's values for a layer, the shipped values in the library),
+/// every value that differs gets a button that puts the default back.
+fn settings_editor(ui: &mut egui::Ui, op: Operation, s: &mut OpSettings, default: Option<&OpSettings>, id: impl std::hash::Hash + std::fmt::Debug) -> bool {
     let pal = theme::p();
     let mut changed = false;
     let row = |ui: &mut egui::Ui, icon: Icon, label: String| {
@@ -2719,19 +2730,45 @@ fn settings_editor(ui: &mut egui::Ui, op: Operation, s: &mut OpSettings, id: imp
             ui.label(RichText::new(label).color(pal.muted));
         });
     };
+    // A reset button when the value differs from the default, saying what it goes back to.
+    let reset = |ui: &mut egui::Ui, differs: bool, to: String| differs && widgets::icon_button_sized(ui, Icon::Undo, false, 18.0, t!("reset-to", value = to)).clicked();
+    let apart = |a: f64, b: f64| (a - b).abs() > 1e-6;
+    // The default as it is shown: photo spacing left open means the photo default.
+    let default = default.map(|d| {
+        let mut d = d.clone();
+        if op == Operation::Photo && d.line_interval_mm <= 0.0 {
+            d.line_interval_mm = DEFAULT_PHOTO_INTERVAL_MM;
+        }
+        d
+    });
     // Narrow enough for the layer cards, also with German's long labels.
-    egui::Grid::new(id).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+    egui::Grid::new(id).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
         row(ui, Icon::Gauge, t!("speed"));
-        changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.speed).range(1.0..=2000.0).suffix(" mm/s").speed(0.5)).changed();
+        ui.horizontal(|ui| {
+            changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.speed).range(1.0..=2000.0).suffix(" mm/s").speed(0.5)).changed();
+            if let Some(d) = &default {
+                if reset(ui, apart(s.speed, d.speed), format!("{} mm/s", d.speed)) {
+                    s.speed = d.speed;
+                    changed = true;
+                }
+            }
+        });
         ui.end_row();
         row(ui, Icon::Zap, t!("power"));
         ui.horizontal(|ui| {
             // A DragValue takes its width from here, not from add_sized.
-            ui.spacing_mut().interact_size.x = 50.0;
+            ui.spacing_mut().interact_size.x = 44.0;
             ui.spacing_mut().item_spacing.x = 3.0;
-            changed |= ui.add_sized([50.0, 24.0], egui::DragValue::new(&mut s.min_power).range(0.0..=s.max_power).suffix(" %").speed(0.5)).changed();
+            changed |= ui.add_sized([44.0, 24.0], egui::DragValue::new(&mut s.min_power).range(0.0..=s.max_power).suffix(" %").speed(0.5)).changed();
             ui.label(RichText::new("–").color(pal.muted));
-            changed |= ui.add_sized([50.0, 24.0], egui::DragValue::new(&mut s.max_power).range(s.min_power..=100.0).suffix(" %").speed(0.5)).changed();
+            changed |= ui.add_sized([44.0, 24.0], egui::DragValue::new(&mut s.max_power).range(s.min_power..=100.0).suffix(" %").speed(0.5)).changed();
+            if let Some(d) = &default {
+                let differs = apart(s.min_power as f64, d.min_power as f64) || apart(s.max_power as f64, d.max_power as f64);
+                if reset(ui, differs, format!("{}–{} %", d.min_power, d.max_power)) {
+                    (s.min_power, s.max_power) = (d.min_power, d.max_power);
+                    changed = true;
+                }
+            }
         });
         ui.end_row();
         if op.uses_line_interval() {
@@ -2742,19 +2779,51 @@ fn settings_editor(ui: &mut egui::Ui, op: Operation, s: &mut OpSettings, id: imp
                 s.line_interval_mm = DEFAULT_PHOTO_INTERVAL_MM;
             }
             let min = if op == Operation::Photo { MIN_PHOTO_INTERVAL_MM } else { 0.01 };
-            changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.line_interval_mm).range(min..=1.0).suffix(" mm").speed(0.005).max_decimals(3)).changed();
+            ui.horizontal(|ui| {
+                changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.line_interval_mm).range(min..=1.0).suffix(" mm").speed(0.005).max_decimals(3)).changed();
+                if let Some(d) = &default {
+                    if reset(ui, apart(s.line_interval_mm as f64, d.line_interval_mm as f64), format!("{} mm", d.line_interval_mm)) {
+                        s.line_interval_mm = d.line_interval_mm;
+                        changed = true;
+                    }
+                }
+            });
             ui.end_row();
         }
         if op == Operation::Cut {
             row(ui, Icon::Scan, t!("kerf"));
-            changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.kerf_mm).range(0.0..=1.0).suffix(" mm").speed(0.005).max_decimals(3)).on_hover_text(t!("kerf-hint")).changed();
+            ui.horizontal(|ui| {
+                changed |= ui.add_sized([110.0, 24.0], egui::DragValue::new(&mut s.kerf_mm).range(0.0..=1.0).suffix(" mm").speed(0.005).max_decimals(3)).on_hover_text(t!("kerf-hint")).changed();
+                if let Some(d) = &default {
+                    if reset(ui, apart(s.kerf_mm as f64, d.kerf_mm as f64), format!("{} mm", d.kerf_mm)) {
+                        s.kerf_mm = d.kerf_mm;
+                        changed = true;
+                    }
+                }
+            });
             ui.end_row();
         }
         row(ui, Icon::Repeat, t!("passes"));
-        changed |= ui.add_sized([62.0, 24.0], egui::DragValue::new(&mut s.passes).range(1..=10)).changed();
+        ui.horizontal(|ui| {
+            changed |= ui.add_sized([62.0, 24.0], egui::DragValue::new(&mut s.passes).range(1..=10)).changed();
+            if let Some(d) = &default {
+                if reset(ui, s.passes != d.passes, d.passes.to_string()) {
+                    s.passes = d.passes;
+                    changed = true;
+                }
+            }
+        });
         ui.end_row();
         row(ui, Icon::Wind, t!("air-assist"));
-        changed |= toggle(ui, &mut s.air_assist).changed();
+        ui.horizontal(|ui| {
+            changed |= toggle(ui, &mut s.air_assist).changed();
+            if let Some(d) = &default {
+                if reset(ui, s.air_assist != d.air_assist, if d.air_assist { t!("on") } else { t!("off") }) {
+                    s.air_assist = d.air_assist;
+                    changed = true;
+                }
+            }
+        });
         ui.end_row();
     });
     changed

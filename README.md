@@ -201,8 +201,11 @@ Fokus keeps its settings and your material library here:
   `.fokus` projects, `.svg` and `.dxf` designs, images and `.rd` job files (as a preview). The **⋮** menu has *Save as* and *Export job file (.rd)*.
 - **Materials** (top right) opens the material library. It comes with the settings for the
   materials in our workshop, taken from the machine's reference sheet; those marked *untested*
-  haven't been tried on our laser yet. Adjust them, add your own or copy existing ones. To change
-  speed or power for one job only, click the small triangle under a layer.
+  haven't been tried on our laser yet. Adjust them, add your own or copy existing ones; a value
+  changed from what Fokus shipped with gets a ↶ button that puts the original back. To change speed
+  or power for one job only, say for denser wood, click the small triangle under a layer: the
+  library stays as it is, the layer is marked *adjusted*, and each changed value has its own ↶ back
+  to the material's value.
 - **Settings** (the gear) has the laser connection, which corner is the machine's origin, the
   language (follows your system unless you choose) and light or dark mode.
 
