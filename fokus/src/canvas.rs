@@ -94,9 +94,7 @@ pub enum ZoomTarget {
 pub struct Scene<'a> {
     pub bed: (f64, f64),
     pub origin_right: bool,
-    /// Live head position, controller mm.
-    pub head: Option<Pt>,
-    /// An opened job file, drawn starting at `job_anchor` (controller mm).
+    /// An opened job file, its start (the head) at `job_anchor` (controller mm).
     pub job: Option<&'a Job>,
     pub job_anchor: Pt,
     pub show_travel: bool,
@@ -1093,8 +1091,10 @@ impl Canvas {
 
         draw_design(&painter, scene, design, self.zoom, to_screen);
 
-        // The start point: where the laser head will be, on the box around
-        // all objects (LotusCut's green square).
+        // The start point (LotusCut's green square) stands for the laser
+        // head: the job starts wherever the head physically is, so where the
+        // design sits on the bed here doesn't matter. The live position isn't
+        // shown, so nothing on screen suggests otherwise.
         if let Some(b @ ((x0, y0), (x1, y1))) = design.bounds() {
             let r = Rect::from_two_pos(to_screen((x0, y0)), to_screen((x1, y1)));
             dashed_rect(&painter, r, pal.ok.gamma_multiply(0.35));
@@ -1102,6 +1102,13 @@ impl Canvas {
             let sq = Rect::from_center_size(c, Vec2::splat(10.0));
             painter.rect_filled(sq, 2.0, pal.ok);
             painter.rect_stroke(sq, 2.0, Stroke::new(1.5, pal.panel), StrokeKind::Outside);
+            // The label goes outside the design, beside the square.
+            let side = |t: i8, len: f32| if t < 0 { -len } else if t > 0 { len } else { 0.0 };
+            let out = Vec2::new(side(scene.anchor.h, 1.0), side(scene.anchor.v, 1.0));
+            let out = if out == Vec2::ZERO { Vec2::new(0.0, -1.0) } else { out };
+            let label = t!("head-label");
+            let w = painter.layout_no_wrap(label.clone(), theme::medium(11.0), pal.panel).size().x + 12.0;
+            badge(&painter, c + Vec2::new(out.x * (w / 2.0 + 10.0), out.y * 18.0), &label, pal.ok, pal.panel);
         }
 
         // Hover hint: the outline of the object under the pointer.
@@ -1193,12 +1200,6 @@ impl Canvas {
             self.paint_text_edit(&painter, design, to_screen);
         }
 
-        // The head, and where the job will start relative to the design.
-        if let Some(head) = scene.head {
-            let hp = to_screen(scene.to_view(head));
-            let bed_rect = Rect::from_two_pos(to_screen((0.0, 0.0)), to_screen(scene.bed));
-            draw_head(&painter, bed_rect, hp, head);
-        }
     }
 
     fn paint_nodes(&self, painter: &egui::Painter, design: &Design, selection: &[usize], to_screen: &impl Fn(Pt) -> Pos2) {
@@ -1585,22 +1586,6 @@ fn draw_job(painter: &egui::Painter, scene: &Scene, job: &Job, to_screen: &impl 
     }
 }
 
-fn draw_head(painter: &egui::Painter, bed_rect: Rect, p: Pos2, head: Pt) {
-    let pal = theme::p();
-    let guide = Stroke::new(1.0, pal.accent.gamma_multiply(0.25));
-    painter.extend(Shape::dashed_line(&[Pos2::new(bed_rect.min.x, p.y), Pos2::new(bed_rect.max.x, p.y)], guide, 6.0, 4.0));
-    painter.extend(Shape::dashed_line(&[Pos2::new(p.x, bed_rect.min.y), Pos2::new(p.x, bed_rect.max.y)], guide, 6.0, 4.0));
-    painter.circle_filled(p, 14.0, pal.accent.gamma_multiply(0.12));
-    painter.circle_stroke(p, 9.0, Stroke::new(1.5, pal.accent));
-    painter.circle_filled(p, 3.0, pal.accent);
-    let label = t!("head-label", x = format!("{:.1}", head.0), y = format!("{:.1}", head.1));
-    let galley = painter.layout_no_wrap(label, theme::medium(11.0), pal.text);
-    let pos = p + Vec2::new(14.0, -14.0 - galley.size().y);
-    let bg = Rect::from_min_size(pos, galley.size()).expand2(Vec2::new(7.0, 4.0));
-    painter.rect_filled(bg, 6.0, pal.panel);
-    painter.rect_stroke(bg, 6.0, Stroke::new(1.0, pal.border), StrokeKind::Inside);
-    painter.galley(pos, galley, pal.text);
-}
 
 #[cfg(test)]
 mod tests {

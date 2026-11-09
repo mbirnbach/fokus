@@ -143,7 +143,7 @@ Fokus keeps its settings and your material library here:
 ## Your first job
 
 1. **Connect the laser.** Switch it on and plug its USB cable into your computer. Fokus finds it
-   by itself; the top right then shows *Idle* and the head position. Close LightBurn or LotusCut
+   by itself; the top right then shows *Idle*. Close LightBurn or LotusCut
    first: only one program can use the laser at a time.
 2. **Choose the material** at the top of the right panel. It decides how fast and how strong the
    laser works, so you never have to type speeds or powers yourself.
@@ -214,8 +214,9 @@ Fokus keeps its settings and your material library here:
 - **"Connection problem" while a job runs:** USB connections next to a laser sometimes drop out
   for a moment. The laser has the whole job and carries on; Fokus reconnects by itself and tells
   you to check the piece afterwards.
-- **The design ended up in the wrong place:** the job starts where the head is, not where the
-  design sits on the screen. Use *Frame* before every job.
+- **The design ended up in the wrong place:** the job starts where the head is, with the design's
+  green start point under it. Where the design sits on the screen doesn't matter, and the screen
+  doesn't show where the head is. Use *Frame* before every job.
 - **Engraving too light or too dark, or a cut doesn't go through:** check the focus first (set it
   with the focus gauge for your material's thickness), then adjust the layer's speed and power.
 

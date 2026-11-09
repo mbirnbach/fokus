@@ -33,7 +33,6 @@ icons! {
     Circle => "circle",
     CircleDot => "circle-dot",
     Copy => "copy",
-    Crosshair => "crosshair",
     Diamond => "diamond",
     Ellipsis => "ellipsis-vertical",
     EyeOff => "eye-off",

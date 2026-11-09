@@ -222,19 +222,18 @@ impl FokusApp {
     }
 
     /// Where new things go (their top-right corner): next to what's already
-    /// there, else at the head if known, else near the origin corner.
+    /// there, else near the origin corner. Not at the head: the screen doesn't
+    /// try to show where the head is, the job simply starts there.
     fn new_corner(&self, snap: Option<&Snapshot>) -> Pt {
         let bed = snap.map(|s| self.bed(s)).unwrap_or(DEFAULT_BED);
-        let head = snap.and_then(|s| s.status.as_ref()).map(|s| s.position);
-        match (head, self.design.bounds()) {
-            (_, Some(((x0, y0), _))) => (x0 - 5.0, y0),
-            (Some(h), None) => self.to_view(bed, h),
-            (None, None) => self.to_view(bed, (10.0, 10.0)),
+        match self.design.bounds() {
+            Some(((x0, y0), _)) => (x0 - 5.0, y0),
+            None => self.to_view(bed, (10.0, 10.0)),
         }
     }
 
     /// Open an SVG, DXF or image (added to the design) or an .rd job (preview
-    /// only). New designs go to the head if known, else near the origin corner.
+    /// only).
     fn open_file(&mut self, path: &Path, snap: Option<&Snapshot>) {
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         logln!("Opening {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
@@ -687,25 +686,6 @@ impl FokusApp {
         self.design.layers.iter().find(|l| l.action == Action::Do(Operation::Engrave)).map(|l| l.color).unwrap_or(PALETTE[1])
     }
 
-    /// Move the design on screen so its start point is where the head is.
-    /// (The job itself always starts at the head; this only lines up the view.)
-    fn place_at_head(&mut self, bed: (f64, f64), head: Pt) {
-        let Some(b) = self.design.bounds() else { return };
-        let (ax, ay) = self.anchor.point(b);
-        let (hx, hy) = self.to_view(bed, head);
-        self.history.checkpoint(&self.design);
-        let all: Vec<usize> = (0..self.design.objects.len()).collect();
-        self.design.translate(&all, (hx - ax, hy - ay));
-        self.design.touch();
-    }
-
-    /// Distance between the head and the design's start point on screen, mm.
-    fn head_offset(&self, bed: (f64, f64), head: Pt) -> Option<f64> {
-        let (ax, ay) = self.anchor.point(self.design.bounds()?);
-        let (hx, hy) = self.to_view(bed, head);
-        Some((hx - ax).hypot(hy - ay))
-    }
-
     /// Room the design needs on the bed around the head, as (left, right,
     /// up, down) in mm, for the "does it fit from here" check.
     fn extent_from_anchor(&self) -> Option<(f64, f64, f64, f64)> {
@@ -1074,14 +1054,14 @@ impl eframe::App for FokusApp {
         let connected = snap.conn == Conn::Connected;
         let bed = self.bed(&snap);
         let material = self.material().cloned();
-        let head = snap.status.as_ref().filter(|_| connected).map(|s| s.position);
         let text_style = self.text_style.clone();
         let scene = Scene {
             bed,
             origin_right: self.origin_right,
-            head,
             job: self.job.as_ref(),
-            job_anchor: snap.status.as_ref().map(|s| s.position).unwrap_or((0.0, 0.0)),
+            // Near the machine's origin, whole: like a design, a job file starts
+            // wherever the head is, so there is no true place to show it.
+            job_anchor: self.job.as_ref().and_then(|j| j.bounds).map(|((x0, y0), _)| (10.0 - x0, 10.0 - y0)).unwrap_or((0.0, 0.0)),
             show_travel: self.show_travel,
             material: material.as_ref(),
             draw_color: self.draw_color,
@@ -1247,7 +1227,7 @@ impl FokusApp {
                             ("job running", Some(JobKind::Frame)) => t!("state-frame-running"),
                             (state, _) => state_label(state),
                         };
-                        (if s.state() == "idle" { pal.ok } else { pal.warn }, format!("{state}  ·  X {:.1}  Y {:.1}", s.position.0, s.position.1))
+                        (if s.state() == "idle" { pal.ok } else { pal.warn }, state)
                     }
                     (Conn::Connecting, _) => (pal.warn, t!("status-connecting")),
                     (Conn::Failed(_), _) => (pal.err, t!("status-problem")),
@@ -1982,7 +1962,6 @@ impl FokusApp {
     fn start_footer(&mut self, ui: &mut egui::Ui, snap: &Snapshot, ready: bool) {
         let pal = theme::p();
         let estimates = self.layer_estimates();
-        let bed = self.bed(snap);
         if let Some(((x0, y0), (x1, y1))) = self.design.bounds() {
             let total: f64 = estimates.iter().flatten().map(|(_, _, t)| *t).sum();
             let time = if estimates.iter().any(Option::is_some) { t!("laser-time", time = fmt_duration(total)) } else { t!("laser-time-unknown") };
@@ -1994,12 +1973,6 @@ impl FokusApp {
                     icons::paint(ui.painter(), r, Icon::Flame, pal.muted);
                 });
             });
-            if let Some(head) = snap.status.as_ref().filter(|_| snap.conn == Conn::Connected).map(|s| s.position) {
-                let off = self.head_offset(bed, head).unwrap_or(0.0);
-                if off > 0.5 && Btn::new(t!("place-at-head")).icon(Icon::Crosshair).width(f32::INFINITY).show(ui).on_hover_text(t!("place-at-head-hint")).clicked() {
-                    self.place_at_head(bed, head);
-                }
-            }
             ui.add_space(4.0);
         }
         ui.horizontal(|ui| {
@@ -2545,13 +2518,11 @@ impl FokusApp {
         let size = (x1 - x0, y1 - y0);
         let bed = self.bed(snap);
         let head = snap.status.as_ref().filter(|_| snap.conn == Conn::Connected).map(|s| s.position);
-        let head_off = head.and_then(|h| self.head_offset(bed, h));
         let extent = self.extent_from_anchor().unwrap_or_default();
         let mut close = false;
         let mut save = false;
         let mut start = false;
         let mut dry = false;
-        let mut place = false;
         let mut frame = false;
 
         let modal = egui::Modal::new(egui::Id::unique("prepare")).frame(modal_frame()).show(ctx, |ui| {
@@ -2596,26 +2567,17 @@ impl FokusApp {
                                 ui.label(RichText::new(text).color(pal.muted).size(12.5));
                                 if i == 2 {
                                     start_corner_diagram(ui, size, self.anchor);
-                                    match (head, head_off) {
-                                        (Some((hx, hy)), Some(off)) => {
-                                            if off > 0.5 {
-                                                ui.label(RichText::new(t!("head-elsewhere", x = format!("{hx:.1}"), y = format!("{hy:.1}"))).color(pal.muted).size(12.5));
-                                            } else {
-                                                ui.label(RichText::new(t!("head-matches", x = format!("{hx:.1}"), y = format!("{hy:.1}"))).color(pal.ok).size(12.5));
-                                            }
-                                            if let Some(problem) = fits_from_head(bed, self.to_view(bed, (hx, hy)), extent) {
+                                    match head {
+                                        // From the real position: does the design stay on the bed?
+                                        Some(h) => {
+                                            if let Some(problem) = fits_from_head(bed, self.to_view(bed, h), extent) {
                                                 notice(ui, Icon::Warning, pal.err, &problem);
                                             }
-                                            ui.horizontal(|ui| {
-                                                if Btn::new(t!("frame")).icon(Icon::Scan).height(28.0).show(ui).on_hover_text(t!("frame-hint")).clicked() {
-                                                    frame = true;
-                                                }
-                                                if off > 0.5 && Btn::new(t!("show-at-head")).icon(Icon::Crosshair).ghost().height(28.0).show(ui).clicked() {
-                                                    place = true;
-                                                }
-                                            });
+                                            if Btn::new(t!("frame")).icon(Icon::Scan).height(28.0).show(ui).on_hover_text(t!("frame-hint")).clicked() {
+                                                frame = true;
+                                            }
                                         }
-                                        _ => {
+                                        None => {
                                             ui.label(RichText::new(t!("connect-to-check")).color(pal.muted).size(12.0));
                                         }
                                     }
@@ -2663,11 +2625,6 @@ impl FokusApp {
         });
         if modal.should_close() || close {
             self.prepare_open = false;
-        }
-        if place {
-            if let Some(h) = head {
-                self.place_at_head(bed, h);
-            }
         }
         if save {
             self.save_job();
