@@ -155,7 +155,9 @@ pub fn reference_materials() -> Vec<Material> {
         notes: format!("{} {notes}", t!("ref-note")).trim().to_string(),
     };
     vec![
-        m("Pappelsperrholz 4 mm", 4.0, op(25.0, 100.0, false, 0.0), wood_engrave.clone(), wood_photo.clone(),
+        // Air assist on although the sheet has it off: without it the plywood
+        // flamed at the head (and LightBurn's job for these values has it on).
+        m("Pappelsperrholz 4 mm", 4.0, op(25.0, 100.0, true, 0.0), wood_engrave.clone(), wood_photo.clone(),
           t!("ref-note-ply4")),
         m("Sperrholz 8 mm", 8.0, op(12.0, 100.0, true, 0.0), wood_engrave, wood_photo,
           t!("ref-note-ply8")),
@@ -176,6 +178,27 @@ pub fn reference_materials() -> Vec<Material> {
         m("Gravurkunststoff Innograv", 0.0, None, op(800.0, 30.0, true, 0.05), None, t!("ref-note-innograv")),
         m("Polypropylen (PP)", 0.0, None, op(500.0, 40.0, false, 0.1), None, t!("ref-note-pp")),
     ]
+}
+
+/// Shipped values that turned out wrong, as (material, operation, as
+/// shipped). A saved library that still has exactly those gets today's values;
+/// anything changed by hand stays as it is.
+fn shipped_mistakes() -> Vec<(&'static str, Operation, OpSettings)> {
+    // Up to 0.1.4: plywood was cut without air assist, and flamed.
+    vec![("Pappelsperrholz 4 mm", Operation::Cut, OpSettings { speed: 25.0, min_power: 100.0, max_power: 100.0, passes: 1, air_assist: false, line_interval_mm: 0.0, kerf_mm: 0.0 })]
+}
+
+fn fix_shipped_values(materials: &mut [Material]) {
+    let reference = reference_materials();
+    for (name, op, wrong) in shipped_mistakes() {
+        let Some(right) = reference.iter().find(|r| r.name == name).and_then(|r| r.settings(op)) else { continue };
+        for m in materials.iter_mut().filter(|m| m.name == name) {
+            let slot = m.settings_mut(op);
+            if slot.as_ref() == Some(&wrong) {
+                *slot = Some(right.clone());
+            }
+        }
+    }
 }
 
 pub struct Library {
@@ -201,6 +224,7 @@ impl Library {
                             p.line_interval_mm = 0.0;
                         }
                     }
+                    fix_shipped_values(&mut materials);
                     lib.materials = materials;
                 }
                 Err(e) => lib.error = Some(t!("err-could-not-read", file = path.display().to_string(), error = e)),
@@ -253,6 +277,30 @@ mod tests {
                 assert!(e.line_interval_mm > 0.0, "{}", m.name);
             }
         }
+    }
+
+    #[test]
+    fn plywood_is_cut_with_air_assist() {
+        let ply = reference_materials().into_iter().find(|m| m.name == "Pappelsperrholz 4 mm").unwrap();
+        assert!(ply.cut.unwrap().air_assist);
+    }
+
+    #[test]
+    fn saved_libraries_lose_the_shipped_mistake_but_keep_hand_made_changes() {
+        let wrong = || shipped_mistakes()[0].2.clone();
+        let ply = |cut: OpSettings| Material { cut: Some(cut), ..reference_materials().into_iter().find(|m| m.name == "Pappelsperrholz 4 mm").unwrap() };
+        // Exactly as shipped up to 0.1.4: corrected.
+        let mut lib = vec![ply(wrong())];
+        fix_shipped_values(&mut lib);
+        assert!(lib[0].cut.as_ref().unwrap().air_assist);
+        // Changed by hand (here: slower), so on purpose: left alone.
+        let mut lib = vec![ply(OpSettings { speed: 20.0, ..wrong() })];
+        fix_shipped_values(&mut lib);
+        assert!(!lib[0].cut.as_ref().unwrap().air_assist);
+        // Another material with the same values: not touched.
+        let mut lib = vec![Material { name: "Mein Holz".into(), ..ply(wrong()) }];
+        fix_shipped_values(&mut lib);
+        assert!(!lib[0].cut.as_ref().unwrap().air_assist);
     }
 
     #[test]
