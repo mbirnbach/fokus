@@ -169,7 +169,8 @@ mod tests {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
         let mut out = BTreeSet::new();
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            let file = std::fs::read_to_string(entry.path()).unwrap();
+            // Windows checkouts have \r\n line ends.
+            let file = std::fs::read_to_string(entry.path()).unwrap().replace("\r\n", "\n");
             // Only program code: the test module isn't shown to users (single
             // test-only items above it are code like any other).
             let text = file.split("#[cfg(test)]\nmod tests").next().unwrap();
