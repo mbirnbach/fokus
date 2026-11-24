@@ -179,6 +179,9 @@ pub struct Object {
     pub flip_y: bool,
     pub color: [u8; 3],
     pub group: Option<u32>,
+    /// Can't be picked, moved or deleted until unlocked (e.g. the board).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 impl Object {
@@ -191,7 +194,7 @@ impl Object {
             Kind::Text { .. } => t!("object-text"),
             Kind::Image { .. } => t!("object-image"),
         };
-        Object { name, kind, x, y, w, h, rotation: 0.0, flip_x: false, flip_y: false, color, group: None }
+        Object { name, kind, x, y, w, h, rotation: 0.0, flip_x: false, flip_y: false, color, group: None, locked: false }
     }
 
     /// A path from sub-paths in design mm.
@@ -262,6 +265,15 @@ impl Object {
     /// Filled shapes suggest engraving rather than cutting.
     pub fn fill_hint(&self) -> bool {
         matches!(self.kind, Kind::Path { filled: true, .. } | Kind::Text { .. })
+    }
+
+    /// A closed shape that can be filled with copies: not text, no open lines.
+    pub fn is_area(&self) -> bool {
+        match &self.kind {
+            Kind::Text { .. } => false,
+            Kind::Path { subpaths, .. } => !subpaths.is_empty() && subpaths.iter().all(|s| s.closed),
+            _ => self.w > 0.0 && self.h > 0.0,
+        }
     }
 
     pub fn is_image(&self) -> bool {
@@ -617,6 +629,58 @@ impl Design {
         }
     }
 
+    /// Lock or unlock objects, whole groups at a time.
+    pub fn set_locked(&mut self, sel: &[usize], locked: bool) {
+        let mut all: Vec<usize> = sel.iter().flat_map(|&i| self.with_group(i)).collect();
+        all.sort_unstable();
+        all.dedup();
+        for i in all {
+            self.objects[i].locked = locked;
+        }
+    }
+
+    /// Everything that isn't locked, for select all.
+    pub fn unlocked(&self) -> Vec<usize> {
+        (0..self.objects.len()).filter(|&i| !self.objects[i].locked).collect()
+    }
+
+    /// Fill `container` with as many copies of `template` as fit, clear of
+    /// everything else in it (see `nest`). Each copy is a group of its own
+    /// when the template is several objects. Returns the copies' indices.
+    pub fn fill_with(&mut self, container: usize, template: &[usize], settings: &crate::nest::Settings) -> Vec<usize> {
+        let mut template = template.to_vec();
+        template.sort_unstable();
+        template.retain(|&i| i != container && i < self.objects.len());
+        let Some(((x0, y0), (x1, y1))) = self.selection_bounds(&template) else { return Vec::new() };
+        let centre = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let shape = self.objects[container].outline();
+        let ((sx0, sy0), (sx1, sy1)) = self.objects[container].bounds();
+        let piece: Vec<Vec<Pt>> = template.iter().flat_map(|&i| self.objects[i].outline()).collect();
+        // Everything else lying in the shape, the originals too, stays where it is.
+        let obstacles: Vec<Vec<Pt>> = (0..self.objects.len())
+            .filter(|&i| i != container)
+            .filter(|&i| {
+                let ((a0, b0), (a1, b1)) = self.objects[i].bounds();
+                a1 >= sx0 && a0 <= sx1 && b1 >= sy0 && b0 <= sy1
+            })
+            .flat_map(|i| self.objects[i].outline())
+            .collect();
+        let placements = crate::nest::fill(&shape, &obstacles, &piece, centre, settings);
+        let originals: Vec<Object> = template.iter().map(|&i| self.objects[i].clone()).collect();
+        let mut new = Vec::new();
+        for p in placements {
+            let copy = self.paste(&originals, p.offset);
+            if p.angle != 0.0 {
+                self.rotate(&copy, p.angle);
+            }
+            if copy.len() > 1 && copy.iter().any(|&i| self.objects[i].group != self.objects[copy[0]].group || self.objects[i].group.is_none()) {
+                self.group(&copy);
+            }
+            new.extend(copy);
+        }
+        new
+    }
+
     pub fn group(&mut self, sel: &[usize]) {
         if sel.len() < 2 {
             return;
@@ -648,6 +712,8 @@ impl Design {
             let mut o = o.clone();
             o.x += offset.0;
             o.y += offset.1;
+            // Copies can be moved, even of something locked.
+            o.locked = false;
             if let Some(g) = o.group {
                 let next = *groups.entry(g).or_insert_with(|| {
                     self.next_group += 1;
@@ -1480,6 +1546,61 @@ mod tests {
         // It still makes a job the controller can read.
         let tp = ruida::job::Toolpath::from_records(&ruida::command::parse(&ruida::writer::write_plain(&job).unwrap()));
         assert_eq!(tp.unknown_commands, 0);
+    }
+
+    #[test]
+    fn filling_places_copies_inside_and_keeps_the_original() {
+        let mut d = Design::default();
+        let board = d.add(Object::new(Kind::Rect { radius: 0.0 }, (0.0, 0.0, 100.0, 50.0), [0, 0, 0]));
+        d.set_locked(&[board], true);
+        // A 10 mm square in the board's corner, and a label next to it as part of the piece.
+        let sq = d.add(Object::new(Kind::Rect { radius: 0.0 }, (0.0, 0.0, 10.0, 10.0), [224, 49, 49]));
+        let settings = crate::nest::Settings { spacing: 0.0, rotations: vec![0.0], max: None };
+        let new = d.fill_with(board, &[sq], &settings);
+        // 50 places, one taken by the original.
+        assert_eq!(new.len(), 49);
+        for &i in &new {
+            let ((x0, y0), (x1, y1)) = d.objects[i].bounds();
+            assert!(x0 >= -1e-9 && y0 >= -1e-9 && x1 <= 100.0 + 1e-9 && y1 <= 50.0 + 1e-9);
+            assert!(!d.objects[i].locked);
+            assert!(!(x0.abs() < 1e-9 && y0.abs() < 1e-9), "not on top of the original");
+        }
+        assert!(d.objects[board].locked && d.objects[sq].x == 0.0);
+    }
+
+    #[test]
+    fn turned_copies_and_several_objects_become_groups() {
+        let mut d = Design::default();
+        let board = d.add(Object::new(Kind::Rect { radius: 0.0 }, (0.0, 0.0, 12.0, 70.0), [0, 0, 0]));
+        let a = d.add(Object::new(Kind::Rect { radius: 0.0 }, (100.0, 0.0, 30.0, 10.0), [224, 49, 49]));
+        let b = d.add(Object::new(Kind::Ellipse, (102.0, 2.0, 6.0, 6.0), [224, 49, 49]));
+        let settings = crate::nest::Settings { spacing: 1.0, rotations: vec![0.0, 90.0], max: None };
+        let new = d.fill_with(board, &[a, b], &settings);
+        assert_eq!(new.len(), 4, "two turned copies of two objects each");
+        // Upright now: 10 wide, 30 high, inside the board.
+        let ((x0, y0), (x1, y1)) = d.selection_bounds(&new[..2]).unwrap();
+        assert!((x1 - x0 - 10.0).abs() < 1e-6 && (y1 - y0 - 30.0).abs() < 1e-6);
+        assert!(x0 >= 1.0 - 1e-6 && x1 <= 11.0 + 1e-6 && y0 >= 1.0 - 1e-6);
+        assert_eq!(d.objects[new[0]].group, d.objects[new[1]].group);
+        assert!(d.objects[new[0]].group.is_some());
+        assert_ne!(d.objects[new[0]].group, d.objects[new[2]].group);
+    }
+
+    #[test]
+    fn locking_takes_whole_groups_and_select_all_skips_them() {
+        let mut d = design();
+        d.set_locked(&[0], true);
+        assert!(d.objects.iter().all(|o| o.locked), "the imported tag is one group");
+        assert!(d.unlocked().is_empty());
+        let copies = d.duplicate(&[0, 1]);
+        assert!(copies.iter().all(|&i| !d.objects[i].locked));
+        d.set_locked(&[1], false);
+        assert_eq!(d.unlocked().len(), d.objects.len());
+        // Saved and loaded.
+        d.set_locked(&[0], true);
+        let json = serde_json::to_string(&d).unwrap();
+        let back: Design = serde_json::from_str(&json).unwrap();
+        assert!(back.objects[0].locked && !back.objects[copies[0]].locked);
     }
 
     #[test]

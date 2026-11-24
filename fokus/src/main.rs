@@ -16,6 +16,7 @@ mod kerf;
 mod logfile;
 mod machine;
 mod materials;
+mod nest;
 mod paths;
 mod project;
 mod raster;

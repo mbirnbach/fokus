@@ -182,6 +182,13 @@ Fokus keeps its settings and your material library here:
 - Mouse wheel to zoom, Space + drag (or the right mouse button) to pan. The buttons at the bottom
   right fit the design or the whole bed into view.
 - Arrow keys nudge the selection by 1 mm (Shift: 10 mm).
+- **Lock** an object (the lock in the bar at the top, or right-click → *Lock*) so it can't be
+  picked, moved or deleted by accident, like the outline of your board. Right-click it to unlock.
+- **Fill a shape with copies:** select what to copy (a star, or a group), then right-click the
+  locked board → *Fill shape with selection…*. Fokus places as many copies as fit, with the spacing
+  you choose and turned if you allow it, around whatever already lies in the board. Without a lock,
+  select the board together with what to copy. Set the board's layer to *Skip* if it's only there
+  to show the material.
 
 | Shortcut (⌘ on Mac, Ctrl elsewhere) | |
 |---|---|

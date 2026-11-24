@@ -17,6 +17,7 @@ use crate::fonts;
 use crate::icons::{self, Icon};
 use crate::job::Job;
 use crate::machine::{Conn, JobKind, JobPhase, Machine, Snapshot};
+use crate::nest;
 use crate::materials::{reference_materials, Library, Material, OpSettings, Operation};
 use crate::project::{self, Project};
 use crate::raster::{ImageLook, ImageMode};
@@ -29,6 +30,24 @@ use crate::widgets::{self, Btn};
 
 const DEFAULT_BED: (f64, f64) = (1000.0, 600.0);
 const PORT_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+/// The fill dialog's state: what fills what, and how.
+struct FillDialog {
+    container: usize,
+    template: Vec<usize>,
+    spacing: f64,
+    /// Rotation steps in degrees; 0 = upright only.
+    step: u32,
+    limited: bool,
+    max: u32,
+    error: Option<String>,
+}
+
+impl FillDialog {
+    fn new((container, template): (usize, Vec<usize>)) -> Self {
+        FillDialog { container, template, spacing: 2.0, step: 90, limited: false, max: 10, error: None }
+    }
+}
+
 /// How much of the log the copied diagnostics carry.
 const DIAGNOSTIC_LOG_LINES: usize = 300;
 /// Image files Fokus opens (as Photo objects).
@@ -117,6 +136,8 @@ pub struct FokusApp {
     prepare_open: bool,
     /// The test grid dialog, while open.
     test_grid: Option<testgrid::Spec>,
+    /// The fill dialog, while open.
+    fill: Option<FillDialog>,
     checklist: [bool; CHECKLIST],
     /// Result of the last save: (ok, message).
     save_msg: Option<(bool, String)>,
@@ -175,6 +196,7 @@ impl FokusApp {
             length_cache: HashMap::new(),
             prepare_open: false,
             test_grid: None,
+            fill: None,
             checklist: [false; CHECKLIST],
             save_msg: None,
             project_path: None,
@@ -543,6 +565,77 @@ impl FokusApp {
         self.test_grid = if create || cancel || escape { None } else { Some(spec) };
     }
 
+    /// The fill dialog: spacing, rotations and how many.
+    fn fill_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut f) = self.fill.take() else { return };
+        if f.container >= self.design.objects.len() || f.template.iter().any(|&i| i >= self.design.objects.len()) {
+            return;
+        }
+        let pal = theme::p();
+        let names = |idx: &[usize]| {
+            let mut n: Vec<String> = idx.iter().map(|&i| self.design.objects[i].name.clone()).collect();
+            n.dedup();
+            n.join(", ")
+        };
+        let (shape, pieces) = (self.design.objects[f.container].name.clone(), names(&f.template));
+        let (mut run, mut cancel) = (false, false);
+        egui::Modal::new(egui::Id::unique("fill")).frame(modal_frame()).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.label(RichText::new(t!("fill-title")).size(18.0).semibold());
+            ui.add_space(2.0);
+            ui.label(RichText::new(t!("fill-text", shape = shape.clone(), pieces = pieces.clone())).color(pal.muted));
+            ui.add_space(12.0);
+            egui::Grid::new("fill-fields").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                widgets::field_label(ui, &t!("fill-spacing"));
+                ui.add_sized([96.0, 24.0], egui::DragValue::new(&mut f.spacing).range(0.0..=50.0).suffix(" mm").speed(0.1)).on_hover_text(t!("fill-spacing-hint"));
+                ui.end_row();
+                widgets::field_label(ui, &t!("fill-turn"));
+                ui.allocate_ui(Vec2::new(300.0, 32.0), |ui| {
+                    widgets::segmented(ui, &mut f.step, &[(0, t!("fill-turn-none")), (180, "180°".to_string()), (90, "90°".to_string()), (45, "45°".to_string()), (15, "15°".to_string())]);
+                });
+                ui.end_row();
+                widgets::field_label(ui, &t!("fill-max"));
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut f.limited, "");
+                    ui.add_enabled(f.limited, egui::DragValue::new(&mut f.max).range(1..=10_000));
+                });
+                ui.end_row();
+            });
+            if let Some(e) = &f.error {
+                ui.add_space(6.0);
+                notice(ui, Icon::Warning, pal.err, e);
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if Btn::new(t!("cancel")).show(ui).clicked() {
+                    cancel = true;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if Btn::new(t!("fill-run")).icon(Icon::Grid).primary().show(ui).clicked() {
+                        run = true;
+                    }
+                });
+            });
+        });
+        let escape = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        if run {
+            let rotations: Vec<f64> = if f.step == 0 { vec![0.0] } else { (0..360 / f.step).map(|k| (k * f.step) as f64).collect() };
+            let settings = nest::Settings { spacing: f.spacing, rotations, max: f.limited.then_some(f.max as usize) };
+            self.history.checkpoint(&self.design);
+            let new = self.design.fill_with(f.container, &f.template, &settings);
+            if new.is_empty() {
+                f.error = Some(t!("fill-none"));
+                self.fill = Some(f);
+            } else {
+                logln!("Filled {shape} with {} copies", new.len());
+                self.selection = new;
+                self.canvas.menu_target = None;
+            }
+        } else if !cancel && !escape {
+            self.fill = Some(f);
+        }
+    }
+
     /// Closing while the laser works: stop the job first, or stay.
     fn quit_job_modal(&mut self, ctx: &egui::Context) {
         if !self.quit_while_job {
@@ -855,7 +948,7 @@ impl FokusApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.prepare_open || self.test_grid.is_some() {
+        if self.prepare_open || self.test_grid.is_some() || self.fill.is_some() {
             return;
         }
         // While text is typed on the canvas it has the keyboard, but undo
@@ -916,7 +1009,7 @@ impl FokusApp {
             self.group_selection(true);
         }
         if all {
-            self.selection = (0..self.design.objects.len()).collect();
+            self.selection = self.design.unlocked();
         }
         if front {
             self.reorder(true);
@@ -1085,6 +1178,7 @@ impl eframe::App for FokusApp {
         self.library_window(ui.ctx());
         self.prepare_modal(ui.ctx(), &snap);
         self.test_grid_modal(ui.ctx(), &snap);
+        self.fill_modal(ui.ctx());
         self.unsaved_modal(ui.ctx());
         self.quit_job_modal(ui.ctx());
 
@@ -1465,6 +1559,10 @@ impl FokusApp {
             } else if ui.add_enabled_ui(sel.len() > 1, |ui| widgets::icon_button(ui, Icon::Group, format!("{}  {}", t!("group"), shortcut(&ctx, Modifiers::COMMAND, Key::G)))).inner.clicked() {
                 self.group_selection(true);
             }
+            if widgets::icon_button(ui, Icon::Lock, t!("lock-hint")).clicked() {
+                let sel = std::mem::take(&mut self.selection);
+                self.edit(|d, _| d.set_locked(&sel, true));
+            }
             if widgets::icon_button(ui, Icon::Copy, format!("{}  {}", t!("duplicate"), shortcut(&ctx, Modifiers::COMMAND, Key::D))).clicked() {
                 self.duplicate();
             }
@@ -1539,10 +1637,45 @@ impl FokusApp {
     }
 
     /// Right-click menu on the canvas.
+    /// What a fill would use: the shape to fill and the objects to copy.
+    /// A locked shape that was right-clicked is filled with the selection;
+    /// otherwise the largest selected shape is filled with the rest.
+    fn fill_plan(&self) -> Option<(usize, Vec<usize>)> {
+        let d = &self.design;
+        if let Some(t) = self.canvas.menu_target.filter(|&t| t < d.objects.len()) {
+            return (d.objects[t].is_area() && !self.selection.is_empty()).then(|| (t, self.selection.clone()));
+        }
+        let area = |i: usize| {
+            let ((x0, y0), (x1, y1)) = d.objects[i].bounds();
+            (x1 - x0) * (y1 - y0)
+        };
+        let container = self.selection.iter().copied().filter(|&i| d.objects[i].is_area()).max_by(|&a, &b| area(a).total_cmp(&area(b)))?;
+        let rest: Vec<usize> = self.selection.iter().copied().filter(|&i| i != container).collect();
+        (!rest.is_empty()).then_some((container, rest))
+    }
+
     fn canvas_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_width(250.0);
         let ctx = ui.ctx().clone();
         let cmd = |k: Key| shortcut(&ctx, Modifiers::COMMAND, k);
+        // A locked object: unlock it, or fill it with the selection.
+        if let Some(t) = self.canvas.menu_target.filter(|&t| t < self.design.objects.len()) {
+            if widgets::menu_item(ui, Some(Icon::LockOpen), &t!("unlock"), "").clicked() {
+                self.edit(|d, _| d.set_locked(&[t], false));
+                self.selection = self.design.with_group(t);
+                self.canvas.menu_target = None;
+                ui.close();
+                return;
+            }
+            if let Some(plan) = self.fill_plan() {
+                if widgets::menu_item(ui, Some(Icon::Grid), &t!("fill-with-selection"), "").clicked() {
+                    self.fill = Some(FillDialog::new(plan));
+                    ui.close();
+                    return;
+                }
+            }
+            ui.separator();
+        }
         let has = !self.selection.is_empty();
         if self.tool == Tool::Nodes && !self.canvas.nodes.is_empty() {
             if widgets::menu_item(ui, Some(Icon::Diamond), &t!("node-corner"), "").clicked() {
@@ -1571,9 +1704,13 @@ impl FokusApp {
         });
         if !has {
             ui.separator();
+            if self.design.objects.iter().any(|o| o.locked) && widgets::menu_item(ui, Some(Icon::LockOpen), &t!("unlock-all"), "").clicked() {
+                let all: Vec<usize> = (0..self.design.objects.len()).collect();
+                self.edit(|d, _| d.set_locked(&all, false));
+            }
             ui.add_enabled_ui(!self.design.is_empty(), |ui| {
                 if widgets::menu_item(ui, Some(Icon::Pointer), &t!("select-all"), &cmd(Key::A)).clicked() {
-                    self.selection = (0..self.design.objects.len()).collect();
+                    self.selection = self.design.unlocked();
                 }
                 if widgets::menu_item(ui, Some(Icon::Focus), &t!("zoom-design"), "").clicked() {
                     self.canvas.zoom_to(ZoomTarget::Design);
@@ -1589,6 +1726,17 @@ impl FokusApp {
         }
         if widgets::menu_item(ui, Some(Icon::Trash), &t!("delete"), &delete_key()).clicked() {
             self.delete_selection();
+        }
+        if widgets::menu_item(ui, Some(Icon::Lock), &t!("lock"), "").clicked() {
+            let sel = std::mem::take(&mut self.selection);
+            self.edit(|d, _| d.set_locked(&sel, true));
+        }
+        if self.canvas.menu_target.is_none() {
+            if let Some(plan) = self.fill_plan() {
+                if widgets::menu_item(ui, Some(Icon::Grid), &t!("fill-with-selection"), "").clicked() {
+                    self.fill = Some(FillDialog::new(plan));
+                }
+            }
         }
         ui.separator();
         if self.is_grouped() {

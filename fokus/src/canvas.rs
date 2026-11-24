@@ -194,6 +194,8 @@ pub struct Canvas {
     rotate_hover: bool,
     /// Object under the pointer (outlined as a hint).
     hovered: Option<usize>,
+    /// A locked object the last right click was on (selection left as it was).
+    pub menu_target: Option<usize>,
 }
 
 impl Default for Canvas {
@@ -210,6 +212,7 @@ impl Default for Canvas {
             text: None,
             rotate_hover: false,
             hovered: None,
+            menu_target: None,
         }
     }
 }
@@ -438,12 +441,19 @@ impl Canvas {
             response.surrender_focus();
         }
 
-        // ---- right click: select what's under the pointer for the context menu
+        // ---- right click: select what's under the pointer for the context menu.
+        // A locked object isn't selected: its menu can unlock it, or fill it
+        // with what is selected.
         if response.secondary_clicked() {
+            self.menu_target = None;
             if let Some(p) = pointer {
                 match hit(design, to_mm(p)) {
                     Some(i) if !selection.contains(&i) => select(selection, design, i, false),
-                    None if *tool != Tool::Nodes => selection.clear(),
+                    None => match hit_locked(design, to_mm(p), tol_mm) {
+                        Some(i) => self.menu_target = Some(i),
+                        None if *tool != Tool::Nodes => selection.clear(),
+                        None => {}
+                    },
                     _ => {}
                 }
             }
@@ -596,7 +606,7 @@ impl Canvas {
             match std::mem::replace(&mut self.drag, Drag::None) {
                 Drag::Marquee { start } => {
                     let ((x0, y0), (x1, y1)) = rect_mm(start, end);
-                    for (i, o) in design.objects.iter().enumerate() {
+                    for (i, o) in design.objects.iter().enumerate().filter(|(_, o)| !o.locked) {
                         let ((a0, b0), (a1, b1)) = o.bounds();
                         if a0 >= x0 && b0 >= y0 && a1 <= x1 && b1 <= y1 && !selection.contains(&i) {
                             selection.extend(design.with_group(i).into_iter().filter(|j| !selection.contains(j)).collect::<Vec<_>>());
@@ -1104,6 +1114,14 @@ impl Canvas {
             painter.rect_stroke(sq, 2.0, Stroke::new(1.5, pal.panel), StrokeKind::Outside);
         }
 
+        // A small lock on locked objects.
+        for o in design.objects.iter().filter(|o| o.locked) {
+            let ((x0, y0), _) = o.bounds();
+            let r = Rect::from_min_size(to_screen((x0, y0)) + Vec2::new(4.0, 4.0), Vec2::splat(18.0));
+            painter.rect_filled(r, 4.0, pal.panel.gamma_multiply(0.9));
+            icons::paint(&painter, r.shrink(3.0), Icon::Lock, pal.muted);
+        }
+
         // Hover hint: the outline of the object under the pointer.
         if let Some(i) = self.hovered.filter(|i| !selection.contains(i)) {
             if let Some(o) = design.objects.get(i) {
@@ -1370,12 +1388,24 @@ fn point_in_object(design: &Design, i: usize, p: Pt, tol: f64) -> bool {
 
 /// The smallest object whose box contains the point (within `tol` mm), so
 /// inner shapes can be picked out of larger ones.
+/// Locked objects are left out: they can't be picked.
 fn hit_test(design: &Design, p: Pt, tol: f64) -> Option<usize> {
+    hit_where(design, p, tol, false)
+}
+
+/// The same among locked objects only, for their right-click menu.
+fn hit_locked(design: &Design, p: Pt, tol: f64) -> Option<usize> {
+    hit_where(design, p, tol, true)
+}
+
+fn hit_where(design: &Design, p: Pt, tol: f64, locked: bool) -> Option<usize> {
     let area = |o: &Object| {
         let ((x0, y0), (x1, y1)) = o.bounds();
         (x1 - x0).max(tol) * (y1 - y0).max(tol)
     };
-    (0..design.objects.len()).filter(|&i| point_in_object(design, i, p, tol)).min_by(|&a, &b| area(&design.objects[a]).total_cmp(&area(&design.objects[b])))
+    (0..design.objects.len())
+        .filter(|&i| design.objects[i].locked == locked && point_in_object(design, i, p, tol))
+        .min_by(|&a, &b| area(&design.objects[a]).total_cmp(&area(&design.objects[b])))
 }
 
 fn lerp3(a: f32, b: f32, t: i8) -> f32 {
