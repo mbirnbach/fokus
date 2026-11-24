@@ -1555,7 +1555,7 @@ mod tests {
         d.set_locked(&[board], true);
         // A 10 mm square in the board's corner, and a label next to it as part of the piece.
         let sq = d.add(Object::new(Kind::Rect { radius: 0.0 }, (0.0, 0.0, 10.0, 10.0), [224, 49, 49]));
-        let settings = crate::nest::Settings { spacing: 0.0, rotations: vec![0.0], max: None };
+        let settings = crate::nest::Settings { spacing: 0.0, rotate: false, max: None };
         let new = d.fill_with(board, &[sq], &settings);
         // 50 places, one taken by the original.
         assert_eq!(new.len(), 49);
@@ -1574,7 +1574,7 @@ mod tests {
         let board = d.add(Object::new(Kind::Rect { radius: 0.0 }, (0.0, 0.0, 12.0, 70.0), [0, 0, 0]));
         let a = d.add(Object::new(Kind::Rect { radius: 0.0 }, (100.0, 0.0, 30.0, 10.0), [224, 49, 49]));
         let b = d.add(Object::new(Kind::Ellipse, (102.0, 2.0, 6.0, 6.0), [224, 49, 49]));
-        let settings = crate::nest::Settings { spacing: 1.0, rotations: vec![0.0, 90.0], max: None };
+        let settings = crate::nest::Settings { spacing: 1.0, rotate: true, max: None };
         let new = d.fill_with(board, &[a, b], &settings);
         assert_eq!(new.len(), 4, "two turned copies of two objects each");
         // Upright now: 10 wide, 30 high, inside the board.

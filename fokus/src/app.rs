@@ -35,8 +35,8 @@ struct FillDialog {
     container: usize,
     template: Vec<usize>,
     spacing: f64,
-    /// Rotation steps in degrees; 0 = upright only.
-    step: u32,
+    /// Copies may be turned; the fill finds the angles.
+    rotate: bool,
     limited: bool,
     max: u32,
     error: Option<String>,
@@ -44,7 +44,7 @@ struct FillDialog {
 
 impl FillDialog {
     fn new((container, template): (usize, Vec<usize>)) -> Self {
-        FillDialog { container, template, spacing: 2.0, step: 90, limited: false, max: 10, error: None }
+        FillDialog { container, template, spacing: 2.0, rotate: true, limited: false, max: 10, error: None }
     }
 }
 
@@ -565,7 +565,7 @@ impl FokusApp {
         self.test_grid = if create || cancel || escape { None } else { Some(spec) };
     }
 
-    /// The fill dialog: spacing, rotations and how many.
+    /// The fill dialog: spacing, whether copies may turn, and how many.
     fn fill_modal(&mut self, ctx: &egui::Context) {
         let Some(mut f) = self.fill.take() else { return };
         if f.container >= self.design.objects.len() || f.template.iter().any(|&i| i >= self.design.objects.len()) {
@@ -590,9 +590,7 @@ impl FokusApp {
                 ui.add_sized([96.0, 24.0], egui::DragValue::new(&mut f.spacing).range(0.0..=50.0).suffix(" mm").speed(0.1)).on_hover_text(t!("fill-spacing-hint"));
                 ui.end_row();
                 widgets::field_label(ui, &t!("fill-turn"));
-                ui.allocate_ui(Vec2::new(300.0, 32.0), |ui| {
-                    widgets::segmented(ui, &mut f.step, &[(0, t!("fill-turn-none")), (180, "180°".to_string()), (90, "90°".to_string()), (45, "45°".to_string()), (15, "15°".to_string())]);
-                });
+                ui.checkbox(&mut f.rotate, "").on_hover_text(t!("fill-turn-hint"));
                 ui.end_row();
                 widgets::field_label(ui, &t!("fill-max"));
                 ui.horizontal(|ui| {
@@ -619,8 +617,7 @@ impl FokusApp {
         });
         let escape = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         if run {
-            let rotations: Vec<f64> = if f.step == 0 { vec![0.0] } else { (0..360 / f.step).map(|k| (k * f.step) as f64).collect() };
-            let settings = nest::Settings { spacing: f.spacing, rotations, max: f.limited.then_some(f.max as usize) };
+            let settings = nest::Settings { spacing: f.spacing, rotate: f.rotate, max: f.limited.then_some(f.max as usize) };
             self.history.checkpoint(&self.design);
             let new = self.design.fill_with(f.container, &f.template, &settings);
             if new.is_empty() {

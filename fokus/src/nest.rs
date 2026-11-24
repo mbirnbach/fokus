@@ -5,10 +5,14 @@
 //! touches it at all, so pieces that don't share a cell never overlap.
 //! Spacing grows everything by half of it, so two pieces (or a piece and the
 //! shape's edge) stay at least that far apart. Then copies go wherever they
-//! fit, row by row, trying each rotation in turn: pieces like stars end up
-//! in each other's gaps. Which rotation goes first changes the result, so
-//! the fill is tried with each rotation alone and with each one first, and
-//! the fullest wins.
+//! fit, row by row.
+//!
+//! With turning allowed, the angle is up to the fill: identical pieces pack
+//! densest in one direction, or alternating with the same piece turned 180°
+//! (stars point to notch, L shapes nesting). So every angle in small steps
+//! is tried, alone and paired with its opposite, and the arrangement with the
+//! most copies wins; of equally many, the one that leaves the free space in
+//! one piece at the end.
 //!
 //! Cells are a fortieth of the piece or finer, so the fill is close but not
 //! perfect: shapes may be up to one cell further apart than asked for, never
@@ -21,8 +25,8 @@ use crate::design::Pt;
 pub struct Settings {
     /// Least distance between pieces, and to the shape's edge, mm.
     pub spacing: f64,
-    /// Rotations to try, degrees clockwise.
-    pub rotations: Vec<f64>,
+    /// Copies may be turned: the fill finds the best angles itself.
+    pub rotate: bool,
     /// Stop after this many copies.
     pub max: Option<usize>,
 }
@@ -41,6 +45,8 @@ const CELLS_PER_PIECE: f64 = 40.0;
 const MIN_CELL_MM: f64 = 0.1;
 /// Largest grid side, cells.
 const MAX_GRID: f64 = 3000.0;
+/// Angles tried when turning is allowed, degrees apart.
+const ANGLE_STEP: u32 = 5;
 /// Tolerance for edges lying exactly on a cell border, in cells.
 const EDGE_EPS: f64 = 1e-6;
 
@@ -273,9 +279,9 @@ pub fn fill(container: &[Vec<Pt>], obstacles: &[Vec<Pt>], piece: &[Vec<Pt>], cen
     }
     let taken = taken.grown(grow);
 
-    // The piece in each rotation, grown the same way.
-    let masks: Vec<(f64, Grid, Pt, (i64, i64))> = settings
-        .rotations
+    // The piece at each angle, grown the same way.
+    let angles: Vec<f64> = if settings.rotate { (0..360 / ANGLE_STEP).map(|k| (k * ANGLE_STEP) as f64).collect() } else { vec![0.0] };
+    let masks: Vec<(f64, Grid, Pt, (i64, i64))> = angles
         .iter()
         .filter_map(|&angle| {
             let turned: Vec<Vec<Pt>> = piece.iter().map(|pl| pl.iter().map(|&p| rotate(p, centre, angle)).collect()).collect();
@@ -293,30 +299,34 @@ pub fn fill(container: &[Vec<Pt>], obstacles: &[Vec<Pt>], piece: &[Vec<Pt>], cen
         })
         .collect();
 
-    // Each rotation alone, and all of them with each one tried first.
-    let n = masks.len();
-    let mut orders: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-    if n > 1 {
-        orders.extend((0..n).map(|first| (0..n).map(|k| (first + k) % n).collect()));
+    // Each angle alone, and paired with its opposite (either one first).
+    let index = |angle: f64| masks.iter().position(|m| (m.0 - angle.rem_euclid(360.0)).abs() < 1e-9);
+    let mut tries: Vec<Vec<usize>> = Vec::new();
+    for (i, m) in masks.iter().enumerate().filter(|(_, m)| m.0 < 180.0) {
+        tries.push(vec![i]);
+        if let Some(j) = index(m.0 + 180.0) {
+            tries.push(vec![i, j]);
+            tries.push(vec![j, i]);
+        }
     }
     let max = settings.max.unwrap_or(usize::MAX);
-    let mut best: Vec<Placement> = Vec::new();
-    for order in orders {
-        let chosen: Vec<&(f64, Grid, Pt, (i64, i64))> = order.iter().map(|&i| &masks[i]).collect();
-        let out = place(taken.clone(), &chosen, origin, c, (gw, gh), max);
-        if out.len() > best.len() {
-            best = out;
-        }
-        if best.len() >= max {
-            break;
+    // Most copies; of equally many, the free space in one piece at the end.
+    let mut best: (Vec<Placement>, i64) = (Vec::new(), i64::MAX);
+    for t in tries {
+        let chosen: Vec<&(f64, Grid, Pt, (i64, i64))> = t.iter().map(|&i| &masks[i]).collect();
+        let (out, end) = place(taken.clone(), &chosen, origin, c, (gw, gh), max);
+        if out.len() > best.0.len() || (out.len() == best.0.len() && end < best.1) {
+            best = (out, end);
         }
     }
-    best
+    best.0
 }
 
-/// Copies wherever they fit, row by row, the first rotation that fits each time.
-fn place(mut taken: Grid, masks: &[&(f64, Grid, Pt, (i64, i64))], origin: Pt, c: f64, (gw, gh): (usize, usize), max: usize) -> Vec<Placement> {
+/// Copies wherever they fit, row by row, the first angle that fits each time.
+/// Also returns the row below the lowest copy.
+fn place(mut taken: Grid, masks: &[&(f64, Grid, Pt, (i64, i64))], origin: Pt, c: f64, (gw, gh): (usize, usize), max: usize) -> (Vec<Placement>, i64) {
     let mut out = Vec::new();
+    let mut end = i64::MIN;
     let (mw, mh) = masks.iter().fold((0, 0), |(w, h), m| (w.max(m.1.w as i64), h.max(m.1.h as i64)));
     'rows: for oy in -mh..gh as i64 {
         for ox in -mw..gw as i64 {
@@ -326,6 +336,7 @@ fn place(mut taken: Grid, masks: &[&(f64, Grid, Pt, (i64, i64))], origin: Pt, c:
                     continue;
                 }
                 taken.or_at(mask, ox, oy);
+                end = end.max(oy + mask.h as i64);
                 let at = (origin.0 + ox as f64 * c, origin.1 + oy as f64 * c);
                 out.push(Placement { angle: *angle, offset: (at.0 - mask_origin.0, at.1 - mask_origin.1) });
                 if out.len() >= max {
@@ -335,7 +346,7 @@ fn place(mut taken: Grid, masks: &[&(f64, Grid, Pt, (i64, i64))], origin: Pt, c:
             }
         }
     }
-    out
+    (out, end)
 }
 
 #[cfg(test)]
@@ -358,8 +369,8 @@ mod tests {
         pts
     }
 
-    fn settings(spacing: f64, rotations: &[f64]) -> Settings {
-        Settings { spacing, rotations: rotations.to_vec(), max: None }
+    fn settings(spacing: f64, rotate: bool) -> Settings {
+        Settings { spacing, rotate, max: None }
     }
 
     fn placed(piece: &[Vec<Pt>], centre: Pt, p: &Placement) -> Vec<Vec<Pt>> {
@@ -388,7 +399,7 @@ mod tests {
     #[test]
     fn squares_fill_a_rectangle_exactly() {
         let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
-        let out = fill(&[rect(0.0, 0.0, 100.0, 50.0)], &[], &sq, (5.0, 5.0), &settings(0.0, &[0.0]));
+        let out = fill(&[rect(0.0, 0.0, 100.0, 50.0)], &[], &sq, (5.0, 5.0), &settings(0.0, false));
         assert_eq!(out.len(), 50);
     }
 
@@ -396,7 +407,7 @@ mod tests {
     fn spacing_keeps_pieces_and_edges_apart() {
         let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
         let container = rect(0.0, 0.0, 100.0, 50.0);
-        let out = fill(std::slice::from_ref(&container), &[], &sq, (5.0, 5.0), &settings(2.0, &[0.0]));
+        let out = fill(std::slice::from_ref(&container), &[], &sq, (5.0, 5.0), &settings(2.0, false));
         // 8 × 4: 2 mm from the edge and between squares.
         assert_eq!(out.len(), 32);
         let shapes: Vec<Vec<Pt>> = out.iter().map(|p| placed(&sq, (5.0, 5.0), p)[0].clone()).collect();
@@ -412,10 +423,10 @@ mod tests {
     fn turning_lets_a_piece_fit() {
         // 30 × 10 into 12 × 32: only upright.
         let bar = vec![rect(0.0, 0.0, 30.0, 10.0)];
-        assert!(fill(&[rect(0.0, 0.0, 12.0, 32.0)], &[], &bar, (15.0, 5.0), &settings(0.0, &[0.0])).is_empty());
-        let out = fill(&[rect(0.0, 0.0, 12.0, 32.0)], &[], &bar, (15.0, 5.0), &settings(0.0, &[0.0, 90.0]));
+        assert!(fill(&[rect(0.0, 0.0, 12.0, 32.0)], &[], &bar, (15.0, 5.0), &settings(0.0, false)).is_empty());
+        let out = fill(&[rect(0.0, 0.0, 12.0, 32.0)], &[], &bar, (15.0, 5.0), &settings(0.0, true));
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].angle, 90.0);
+        assert_eq!(out[0].angle.rem_euclid(180.0), 90.0);
     }
 
     #[test]
@@ -423,10 +434,10 @@ mod tests {
         let s = vec![star(0.0, 0.0, 20.0)];
         let board = rect(0.0, 0.0, 200.0, 120.0);
         let spacing = 1.0;
-        let upright = fill(std::slice::from_ref(&board), &[], &s, (0.0, 0.0), &settings(spacing, &[0.0]));
-        let turned = fill(std::slice::from_ref(&board), &[], &s, (0.0, 0.0), &settings(spacing, &[0.0, 36.0, 180.0]));
+        let upright = fill(std::slice::from_ref(&board), &[], &s, (0.0, 0.0), &settings(spacing, false));
+        let turned = fill(std::slice::from_ref(&board), &[], &s, (0.0, 0.0), &settings(spacing, true));
         assert!(upright.len() >= 12, "{}", upright.len());
-        assert!(turned.len() >= upright.len(), "more rotations never fit fewer: {} vs {}", turned.len(), upright.len());
+        assert!(turned.len() > upright.len(), "turning fits more stars: {} vs {}", turned.len(), upright.len());
         let shapes: Vec<Vec<Pt>> = turned.iter().map(|p| placed(&s, (0.0, 0.0), p)[0].clone()).collect();
         for (i, a) in shapes.iter().enumerate() {
             assert!(a.iter().all(|&(x, y)| x >= spacing - 1e-6 && y >= spacing - 1e-6 && x <= 200.0 - spacing + 1e-6 && y <= 120.0 - spacing + 1e-6));
@@ -437,13 +448,36 @@ mod tests {
     }
 
     #[test]
+    fn turning_finds_the_dense_way_for_l_shapes() {
+        // An L 20 × 20 with 10 mm legs: half of its box is empty, so pairs turned 180° fill it.
+        let l = vec![vec![(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (10.0, 10.0), (10.0, 20.0), (0.0, 20.0), (0.0, 0.0)]];
+        let board = [rect(0.0, 0.0, 120.0, 80.0)];
+        let upright = fill(&board, &[], &l, (10.0, 10.0), &settings(0.0, false)).len();
+        let turned = fill(&board, &[], &l, (10.0, 10.0), &settings(0.0, true)).len();
+        assert_eq!(upright, 24, "one per 20 × 20 box");
+        // 120 × 80 holds 9600 mm², an L 300 mm²: 32 is every bit of the board.
+        assert_eq!(turned, 32, "pairs turned 180° fill the board completely");
+    }
+
+    #[test]
+    fn of_equally_many_the_free_space_stays_together() {
+        // Three squares fit either way; the fill leaves the rest of the board in one piece.
+        let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
+        let mut s = settings(0.0, true);
+        s.max = Some(3);
+        let out = fill(&[rect(0.0, 0.0, 100.0, 50.0)], &[], &sq, (5.0, 5.0), &s);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|p| p.offset.1.abs() < 1e-6), "all in the first row: {out:?}");
+    }
+
+    #[test]
     fn what_is_already_there_stays_free_and_holes_too() {
         let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
         // A 50 × 50 board with a 30 × 30 hole in the middle: only the 10 mm frame is left.
         let board = vec![rect(0.0, 0.0, 50.0, 50.0), rect(10.0, 10.0, 30.0, 30.0)];
-        assert_eq!(fill(&board, &[], &sq, (5.0, 5.0), &settings(0.0, &[0.0])).len(), 16);
+        assert_eq!(fill(&board, &[], &sq, (5.0, 5.0), &settings(0.0, false)).len(), 16);
         // Something lying in the top-left corner.
-        let out = fill(&[rect(0.0, 0.0, 30.0, 10.0)], &[rect(0.0, 0.0, 10.0, 10.0)], &sq, (5.0, 5.0), &settings(0.0, &[0.0]));
+        let out = fill(&[rect(0.0, 0.0, 30.0, 10.0)], &[rect(0.0, 0.0, 10.0, 10.0)], &sq, (5.0, 5.0), &settings(0.0, false));
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|p| p.offset.0 >= 10.0 - 1e-9));
     }
@@ -451,9 +485,9 @@ mod tests {
     #[test]
     fn a_limit_stops_early_and_nothing_fits_into_too_little() {
         let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
-        let mut s = settings(0.0, &[0.0]);
+        let mut s = settings(0.0, false);
         s.max = Some(3);
         assert_eq!(fill(&[rect(0.0, 0.0, 100.0, 50.0)], &[], &sq, (5.0, 5.0), &s).len(), 3);
-        assert!(fill(&[rect(0.0, 0.0, 9.0, 9.0)], &[], &sq, (5.0, 5.0), &settings(0.0, &[0.0])).is_empty());
+        assert!(fill(&[rect(0.0, 0.0, 9.0, 9.0)], &[], &sq, (5.0, 5.0), &settings(0.0, false)).is_empty());
     }
 }
