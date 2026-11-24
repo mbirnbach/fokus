@@ -376,6 +376,14 @@ impl Object {
     }
 }
 
+/// The objects to copy: sorted, without the shape itself.
+fn fill_template(template: &[usize], container: usize, len: usize) -> Vec<usize> {
+    let mut t: Vec<usize> = template.iter().copied().filter(|&i| i != container && i < len).collect();
+    t.sort_unstable();
+    t.dedup();
+    t
+}
+
 fn points_bounds<'a>(pts: impl Iterator<Item = &'a Pt>) -> Option<Bounds> {
     pts.fold(None, |b, &(x, y)| match b {
         None => Some(((x, y), (x, y))),
@@ -644,20 +652,14 @@ impl Design {
         (0..self.objects.len()).filter(|&i| !self.objects[i].locked).collect()
     }
 
-    /// Fill `container` with as many copies of `template` as fit, clear of
-    /// everything else in it (see `nest`). Each copy is a group of its own
-    /// when the template is several objects. Returns the copies' indices.
-    pub fn fill_with(&mut self, container: usize, template: &[usize], settings: &crate::nest::Settings) -> Vec<usize> {
-        let mut template = template.to_vec();
-        template.sort_unstable();
-        template.retain(|&i| i != container && i < self.objects.len());
-        let Some(((x0, y0), (x1, y1))) = self.selection_bounds(&template) else { return Vec::new() };
-        let centre = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-        let shape = self.objects[container].outline();
-        let ((sx0, sy0), (sx1, sy1)) = self.objects[container].bounds();
-        let piece: Vec<Vec<Pt>> = template.iter().flat_map(|&i| self.objects[i].outline()).collect();
-        // Everything else lying in the shape, the originals too, stays where it is.
-        let obstacles: Vec<Vec<Pt>> = (0..self.objects.len())
+    /// What filling `container` with copies of `template` starts from: the
+    /// shape, the piece, and everything else lying in the shape (the
+    /// originals too), which stays where it is.
+    pub fn fill_problem(&self, container: usize, template: &[usize], settings: &crate::nest::Settings) -> Option<crate::nest::Problem> {
+        let template = fill_template(template, container, self.objects.len());
+        let ((x0, y0), (x1, y1)) = self.selection_bounds(&template)?;
+        let ((sx0, sy0), (sx1, sy1)) = self.objects.get(container)?.bounds();
+        let obstacles = (0..self.objects.len())
             .filter(|&i| i != container)
             .filter(|&i| {
                 let ((a0, b0), (a1, b1)) = self.objects[i].bounds();
@@ -665,7 +667,19 @@ impl Design {
             })
             .flat_map(|i| self.objects[i].outline())
             .collect();
-        let placements = crate::nest::fill(&shape, &obstacles, &piece, centre, settings);
+        Some(crate::nest::Problem {
+            container: self.objects[container].outline(),
+            obstacles,
+            piece: template.iter().flat_map(|&i| self.objects[i].outline()).collect(),
+            centre: ((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+            settings: settings.clone(),
+        })
+    }
+
+    /// Add a copy of `template` for each placement. Each copy is a group of
+    /// its own when the template is several objects. Returns their indices.
+    pub fn apply_fill(&mut self, container: usize, template: &[usize], placements: &[crate::nest::Placement]) -> Vec<usize> {
+        let template = fill_template(template, container, self.objects.len());
         let originals: Vec<Object> = template.iter().map(|&i| self.objects[i].clone()).collect();
         let mut new = Vec::new();
         for p in placements {
@@ -679,6 +693,16 @@ impl Design {
             new.extend(copy);
         }
         new
+    }
+
+    /// Fill `container` with as many copies of `template` as the quick fill
+    /// finds (see `nest`). Returns the copies' indices. The app searches
+    /// longer (`nest::search`) and applies the result with `apply_fill`.
+    #[cfg(test)]
+    pub fn fill_with(&mut self, container: usize, template: &[usize], settings: &crate::nest::Settings) -> Vec<usize> {
+        let Some(problem) = self.fill_problem(container, template, settings) else { return Vec::new() };
+        let placements = crate::nest::fill(&problem);
+        self.apply_fill(container, template, &placements)
     }
 
     pub fn group(&mut self, sel: &[usize]) {

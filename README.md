@@ -187,7 +187,8 @@ Fokus keeps its settings and your material library here:
 - **Fill a shape with copies:** select what to copy (a star, or a group), then right-click the
   locked board → *Fill shape with selection…*. Fokus places as many copies as fit, with the spacing
   you choose, around whatever already lies in the board. Allow turning and it finds the angles
-  itself, also pairs turned against each other, like stars point to notch. Without a lock,
+  itself, also pairs turned against each other, like stars point to notch. It searches for up to
+  30 seconds, showing the best count so far; *Done* takes it whenever you like. Without a lock,
   select the board together with what to copy. Set the board's layer to *Skip* if it's only there
   to show the material.
 

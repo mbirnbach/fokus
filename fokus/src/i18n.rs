@@ -170,8 +170,9 @@ mod tests {
         let mut out = BTreeSet::new();
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
             let file = std::fs::read_to_string(entry.path()).unwrap();
-            // Only program code: tests aren't shown to users.
-            let text = file.split("#[cfg(test)]").next().unwrap();
+            // Only program code: the test module isn't shown to users (single
+            // test-only items above it are code like any other).
+            let text = file.split("#[cfg(test)]\nmod tests").next().unwrap();
             // The macro as its own word, not the end of format! and friends.
             for (i, _) in text.match_indices("t!(") {
                 if text[..i].chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_') {

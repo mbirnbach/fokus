@@ -18,6 +18,10 @@
 //! perfect: shapes may be up to one cell further apart than asked for, never
 //! closer.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
 use crate::design::Pt;
 
 /// How to fill.
@@ -252,101 +256,333 @@ fn rotate((x, y): Pt, (cx, cy): Pt, deg: f64) -> Pt {
     (cx + dx * c - dy * s, cy + dx * s + dy * c)
 }
 
-/// Fill `container` (closed outlines, even-odd, so holes stay free) with
-/// copies of `piece` (outlines; closed ones count filled), turned around
-/// `centre`, keeping clear of `obstacles`.
-pub fn fill(container: &[Vec<Pt>], obstacles: &[Vec<Pt>], piece: &[Vec<Pt>], centre: Pt, settings: &Settings) -> Vec<Placement> {
-    let (Some(((cx0, cy0), (cx1, cy1))), Some(((px0, py0), (px1, py1)))) = (bounds(container), bounds(piece)) else { return Vec::new() };
-    let size = (px1 - px0).min(py1 - py0).max((px1 - px0).max(py1 - py0) / 4.0);
-    let c = (size / CELLS_PER_PIECE).max(MIN_CELL_MM).max((cx1 - cx0).max(cy1 - cy0) / MAX_GRID);
-    // Each shape grows by half the spacing.
-    let grow = (settings.spacing / 2.0 / c).ceil().max(0.0) as i64;
-    let margin = grow + 1;
-
-    // What is taken: outside the shape, its edge, and what's already in it.
-    let origin = (cx0 - margin as f64 * c, cy0 - margin as f64 * c);
-    let raster = Raster { origin, c };
-    let (gw, gh) = (((cx1 - cx0) / c).ceil() as usize + 2 * margin as usize, ((cy1 - cy0) / c).ceil() as usize + 2 * margin as usize);
-    let mut inside = Grid::new(gw, gh);
-    raster.fill(&mut inside, container);
-    let mut taken = inside.inverted();
-    raster.edges(&mut taken, container);
-    for o in obstacles {
-        raster.edges(&mut taken, std::slice::from_ref(o));
-        if closed(o) {
-            raster.fill(&mut taken, std::slice::from_ref(o));
-        }
-    }
-    let taken = taken.grown(grow);
-
-    // The piece at each angle, grown the same way.
-    let angles: Vec<f64> = if settings.rotate { (0..360 / ANGLE_STEP).map(|k| (k * ANGLE_STEP) as f64).collect() } else { vec![0.0] };
-    let masks: Vec<(f64, Grid, Pt, (i64, i64))> = angles
-        .iter()
-        .filter_map(|&angle| {
-            let turned: Vec<Vec<Pt>> = piece.iter().map(|pl| pl.iter().map(|&p| rotate(p, centre, angle)).collect()).collect();
-            let ((bx0, by0), (bx1, by1)) = bounds(&turned)?;
-            let origin = (bx0 - margin as f64 * c, by0 - margin as f64 * c);
-            let raster = Raster { origin, c };
-            let mut mask = Grid::new(((bx1 - bx0) / c).ceil() as usize + 2 * margin as usize, ((by1 - by0) / c).ceil() as usize + 2 * margin as usize);
-            raster.edges(&mut mask, &turned);
-            for pl in turned.iter().filter(|pl| closed(pl)) {
-                raster.fill(&mut mask, std::slice::from_ref(pl));
-            }
-            let mask = mask.grown(grow);
-            let first = mask.first_set()?;
-            Some((angle, mask, origin, first))
-        })
-        .collect();
-
-    // Each angle alone, and paired with its opposite (either one first).
-    let index = |angle: f64| masks.iter().position(|m| (m.0 - angle.rem_euclid(360.0)).abs() < 1e-9);
-    let mut tries: Vec<Vec<usize>> = Vec::new();
-    for (i, m) in masks.iter().enumerate().filter(|(_, m)| m.0 < 180.0) {
-        tries.push(vec![i]);
-        if let Some(j) = index(m.0 + 180.0) {
-            tries.push(vec![i, j]);
-            tries.push(vec![j, i]);
-        }
-    }
-    let max = settings.max.unwrap_or(usize::MAX);
-    // Most copies; of equally many, the free space in one piece at the end.
-    let mut best: (Vec<Placement>, i64) = (Vec::new(), i64::MAX);
-    for t in tries {
-        let chosen: Vec<&(f64, Grid, Pt, (i64, i64))> = t.iter().map(|&i| &masks[i]).collect();
-        let (out, end) = place(taken.clone(), &chosen, origin, c, (gw, gh), max);
-        if out.len() > best.0.len() || (out.len() == best.0.len() && end < best.1) {
-            best = (out, end);
-        }
-    }
-    best.0
+/// What a fill starts from, owned, so a search can run on a thread of its own.
+#[derive(Debug, Clone)]
+pub struct Problem {
+    /// Closed outlines, even-odd, so holes stay free.
+    pub container: Vec<Vec<Pt>>,
+    /// What already lies in the shape.
+    pub obstacles: Vec<Vec<Pt>>,
+    /// The piece's outlines; closed ones count filled.
+    pub piece: Vec<Vec<Pt>>,
+    /// The piece turns around this point.
+    pub centre: Pt,
+    pub settings: Settings,
 }
 
-/// Copies wherever they fit, row by row, the first angle that fits each time.
-/// Also returns the row below the lowest copy.
-fn place(mut taken: Grid, masks: &[&(f64, Grid, Pt, (i64, i64))], origin: Pt, c: f64, (gw, gh): (usize, usize), max: usize) -> (Vec<Placement>, i64) {
-    let mut out = Vec::new();
-    let mut end = i64::MIN;
-    let (mw, mh) = masks.iter().fold((0, 0), |(w, h), m| (w.max(m.1.w as i64), h.max(m.1.h as i64)));
-    'rows: for oy in -mh..gh as i64 {
-        for ox in -mw..gw as i64 {
-            for &(angle, mask, mask_origin, (fx, fy)) in masks {
+/// The shape and what's taken in it, drawn at one cell size.
+struct Board {
+    taken: Grid,
+    origin: Pt,
+    c: f64,
+    size: (usize, usize),
+    margin: i64,
+    grow: i64,
+}
+
+/// The piece at one angle, drawn and grown like the board.
+struct Mask {
+    angle: f64,
+    grid: Grid,
+    origin: Pt,
+    first: (i64, i64),
+}
+
+impl Problem {
+    /// The board with cells `per_piece` to the piece's size.
+    fn board(&self, per_piece: f64) -> Option<Board> {
+        let ((cx0, cy0), (cx1, cy1)) = bounds(&self.container)?;
+        let ((px0, py0), (px1, py1)) = bounds(&self.piece)?;
+        let size = (px1 - px0).min(py1 - py0).max((px1 - px0).max(py1 - py0) / 4.0);
+        let c = (size / per_piece).max(MIN_CELL_MM).max((cx1 - cx0).max(cy1 - cy0) / MAX_GRID);
+        // Each shape grows by half the spacing.
+        let grow = (self.settings.spacing / 2.0 / c).ceil().max(0.0) as i64;
+        let margin = grow + 1;
+        // What is taken: outside the shape, its edge, and what's already in it.
+        let origin = (cx0 - margin as f64 * c, cy0 - margin as f64 * c);
+        let raster = Raster { origin, c };
+        let size = (((cx1 - cx0) / c).ceil() as usize + 2 * margin as usize, ((cy1 - cy0) / c).ceil() as usize + 2 * margin as usize);
+        let mut inside = Grid::new(size.0, size.1);
+        raster.fill(&mut inside, &self.container);
+        let mut taken = inside.inverted();
+        raster.edges(&mut taken, &self.container);
+        for o in &self.obstacles {
+            raster.edges(&mut taken, std::slice::from_ref(o));
+            if closed(o) {
+                raster.fill(&mut taken, std::slice::from_ref(o));
+            }
+        }
+        Some(Board { taken: taken.grown(grow), origin, c, size, margin, grow })
+    }
+
+    fn mask(&self, board: &Board, angle: f64) -> Option<Mask> {
+        let (c, margin) = (board.c, board.margin);
+        let turned: Vec<Vec<Pt>> = self.piece.iter().map(|pl| pl.iter().map(|&p| rotate(p, self.centre, angle)).collect()).collect();
+        let ((bx0, by0), (bx1, by1)) = bounds(&turned)?;
+        let origin = (bx0 - margin as f64 * c, by0 - margin as f64 * c);
+        let raster = Raster { origin, c };
+        let mut grid = Grid::new(((bx1 - bx0) / c).ceil() as usize + 2 * margin as usize, ((by1 - by0) / c).ceil() as usize + 2 * margin as usize);
+        raster.edges(&mut grid, &turned);
+        for pl in turned.iter().filter(|pl| closed(pl)) {
+            raster.fill(&mut grid, std::slice::from_ref(pl));
+        }
+        let grid = grid.grown(board.grow);
+        let first = grid.first_set()?;
+        Some(Mask { angle, grid, origin, first })
+    }
+
+    /// The angle sets to try: each angle alone, and with its opposite (either first).
+    fn angle_sets(&self) -> Vec<Vec<f64>> {
+        if !self.settings.rotate {
+            return vec![vec![0.0]];
+        }
+        (0..180 / ANGLE_STEP).flat_map(|k| {
+            let a = (k * ANGLE_STEP) as f64;
+            [vec![a], vec![a, a + 180.0], vec![a + 180.0, a]]
+        }).collect()
+    }
+}
+
+/// Which way copies are placed: rows or columns, from which corner.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Order {
+    columns: bool,
+    flip_x: bool,
+    flip_y: bool,
+}
+
+const ORDERS: [Order; 8] = [
+    Order { columns: false, flip_x: false, flip_y: false },
+    Order { columns: false, flip_x: true, flip_y: false },
+    Order { columns: false, flip_x: false, flip_y: true },
+    Order { columns: false, flip_x: true, flip_y: true },
+    Order { columns: true, flip_x: false, flip_y: false },
+    Order { columns: true, flip_x: true, flip_y: false },
+    Order { columns: true, flip_x: false, flip_y: true },
+    Order { columns: true, flip_x: true, flip_y: true },
+];
+
+/// A fill and how good it is.
+#[derive(Debug, Clone, Default)]
+struct Result {
+    placements: Vec<Placement>,
+    /// Area of the box around all copies, mm²: smaller keeps the free space together.
+    spread: f64,
+}
+
+impl Result {
+    /// More copies; of equally many, the free space in one piece.
+    fn beats(&self, other: &Result) -> bool {
+        self.placements.len() > other.placements.len() || (self.placements.len() == other.placements.len() && self.spread < other.spread - 1e-6)
+    }
+}
+
+/// Copies wherever they fit in `order`, the first angle that fits each time.
+fn place(board: &Board, masks: &[&Mask], order: Order, max: usize) -> Result {
+    let mut taken = board.taken.clone();
+    let (gw, gh) = (board.size.0 as i64, board.size.1 as i64);
+    let (mw, mh) = masks.iter().fold((0, 0), |(w, h), m| (w.max(m.grid.w as i64), h.max(m.grid.h as i64)));
+    let span = |lo: i64, hi: i64, flip: bool| -> Box<dyn Iterator<Item = i64>> { if flip { Box::new((lo..hi).rev()) } else { Box::new(lo..hi) } };
+    let mut placements = Vec::new();
+    let (mut lo, mut hi) = ((i64::MAX, i64::MAX), (i64::MIN, i64::MIN));
+    let (outer, inner) = if order.columns { ((-mw, gw, order.flip_x), (-mh, gh, order.flip_y)) } else { ((-mh, gh, order.flip_y), (-mw, gw, order.flip_x)) };
+    'outer: for a in span(outer.0, outer.1, outer.2) {
+        for b in span(inner.0, inner.1, inner.2) {
+            let (ox, oy) = if order.columns { (a, b) } else { (b, a) };
+            for m in masks {
                 // Quick no: the mask's first cell lands on a taken one.
-                if taken.get(ox + fx, oy + fy) || !taken.fits(mask, ox, oy) {
+                if taken.get(ox + m.first.0, oy + m.first.1) || !taken.fits(&m.grid, ox, oy) {
                     continue;
                 }
-                taken.or_at(mask, ox, oy);
-                end = end.max(oy + mask.h as i64);
-                let at = (origin.0 + ox as f64 * c, origin.1 + oy as f64 * c);
-                out.push(Placement { angle: *angle, offset: (at.0 - mask_origin.0, at.1 - mask_origin.1) });
-                if out.len() >= max {
-                    break 'rows;
+                taken.or_at(&m.grid, ox, oy);
+                lo = (lo.0.min(ox), lo.1.min(oy));
+                hi = (hi.0.max(ox + m.grid.w as i64), hi.1.max(oy + m.grid.h as i64));
+                let at = (board.origin.0 + ox as f64 * board.c, board.origin.1 + oy as f64 * board.c);
+                placements.push(Placement { angle: m.angle, offset: (at.0 - m.origin.0, at.1 - m.origin.1) });
+                if placements.len() >= max {
+                    break 'outer;
                 }
                 break;
             }
         }
     }
-    (out, end)
+    let spread = if placements.is_empty() { 0.0 } else { ((hi.0 - lo.0) * (hi.1 - lo.1)) as f64 * board.c * board.c };
+    Result { placements, spread }
+}
+
+/// A quick fill: each angle set once, row by row. `search` starts the same
+/// way and then keeps looking.
+#[cfg(test)]
+pub fn fill(problem: &Problem) -> Vec<Placement> {
+    let Some(board) = problem.board(CELLS_PER_PIECE) else { return Vec::new() };
+    let max = problem.settings.max.unwrap_or(usize::MAX);
+    let mut masks: Vec<Mask> = Vec::new();
+    let mut best = Result::default();
+    for set in problem.angle_sets() {
+        for &a in &set {
+            if !masks.iter().any(|m| m.angle == a) {
+                masks.extend(problem.mask(&board, a));
+            }
+        }
+        let chosen: Vec<&Mask> = set.iter().filter_map(|a| masks.iter().find(|m| m.angle == *a)).collect();
+        if chosen.len() < set.len() {
+            continue;
+        }
+        let r = place(&board, &chosen, Order::default(), max);
+        if r.beats(&best) {
+            best = r;
+        }
+    }
+    best.placements
+}
+
+/// A search running on another thread: its best fill so far, and a way to stop it.
+#[derive(Default)]
+pub struct Search {
+    best: Mutex<Vec<Placement>>,
+    pub stop: AtomicBool,
+    pub done: AtomicBool,
+}
+
+impl Search {
+    pub fn best(&self) -> Vec<Placement> {
+        self.best.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn count(&self) -> usize {
+        self.best.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+/// Cells per piece for the closer looks after the quick fill.
+const FINER: [f64; 2] = [70.0, 100.0];
+/// Angle sets that go on to the finer grids.
+const KEEP_SETS: usize = 6;
+
+/// Look for a better fill until `budget` is used up, nothing has improved for
+/// `plateau`, or `search.stop` is set. Starts with the quick fill, then tries
+/// every placing order, then finer grids for the best angles, then random
+/// angles and orders. The best so far is in `search` all along.
+pub fn search(problem: &Problem, search: &Search, budget: Duration, plateau: Duration) {
+    let started = Instant::now();
+    let mut improved = started;
+    let max = problem.settings.max.unwrap_or(usize::MAX);
+    let mut best = Result::default();
+    let mut rng = Rng::new();
+    // Each try; false when it's time to stop.
+    let run = |board: &Board, masks: &[&Mask], order: Order, best: &mut Result, improved: &mut Instant, patient: bool| -> (bool, usize) {
+        if search.stop.load(Ordering::Relaxed) || started.elapsed() > budget || (patient && improved.elapsed() > plateau) {
+            return (false, 0);
+        }
+        let r = place(board, masks, order, max);
+        let n = r.placements.len();
+        if r.beats(best) {
+            *best = r;
+            *improved = Instant::now();
+            *search.best.lock().unwrap_or_else(|e| e.into_inner()) = best.placements.clone();
+        }
+        (true, n)
+    };
+    let sets = problem.angle_sets();
+    let masks_for = |board: &Board, cache: &mut Vec<Mask>, set: &[f64]| -> bool {
+        for &a in set {
+            if !cache.iter().any(|m| (m.angle - a).abs() < 1e-9) {
+                match problem.mask(board, a) {
+                    Some(m) => cache.push(m),
+                    None => return false,
+                }
+            }
+        }
+        true
+    };
+
+    // Every angle set and placing order on the quick grid; remember how each set did.
+    let Some(board) = problem.board(CELLS_PER_PIECE) else { return finish(search) };
+    let mut cache = Vec::new();
+    let mut scores: Vec<(usize, Vec<f64>)> = Vec::new();
+    'quick: for order in ORDERS {
+        for set in &sets {
+            if !masks_for(&board, &mut cache, set) {
+                continue;
+            }
+            let chosen: Vec<&Mask> = set.iter().filter_map(|a| cache.iter().find(|m| (m.angle - a).abs() < 1e-9)).collect();
+            let (go, n) = run(&board, &chosen, order, &mut best, &mut improved, false);
+            if !go {
+                break 'quick;
+            }
+            match scores.iter_mut().find(|(_, s)| s == set) {
+                Some(entry) => entry.0 = entry.0.max(n),
+                None => scores.push((n, set.clone())),
+            }
+        }
+    }
+    scores.sort_by(|a, b| b.0.cmp(&a.0));
+    let top: Vec<Vec<f64>> = scores.into_iter().take(KEEP_SETS).map(|(_, s)| s).collect();
+
+    // The best angle sets again on finer grids, every order.
+    let mut finest = None;
+    for per_piece in FINER {
+        let Some(board) = problem.board(per_piece) else { break };
+        let mut cache = Vec::new();
+        for set in &top {
+            if !masks_for(&board, &mut cache, set) {
+                continue;
+            }
+            let chosen: Vec<&Mask> = set.iter().filter_map(|a| cache.iter().find(|m| (m.angle - a).abs() < 1e-9)).collect();
+            for order in ORDERS {
+                if !run(&board, &chosen, order, &mut best, &mut improved, true).0 {
+                    return finish(search);
+                }
+            }
+        }
+        finest = Some((board, cache));
+    }
+
+    // Random angles (also between the steps, near the best ones half the time) and orders.
+    let Some((board, mut cache)) = finest else { return finish(search) };
+    if !problem.settings.rotate {
+        return finish(search);
+    }
+    loop {
+        let base = if rng.below(2) == 0 && !top.is_empty() { top[rng.below(top.len())][0] + (rng.below(21) as f64 - 10.0) * 0.5 } else { rng.below(360) as f64 * 0.5 };
+        let a = base.rem_euclid(180.0);
+        let set = match rng.below(3) {
+            0 => vec![a],
+            1 => vec![a, a + 180.0],
+            _ => vec![a + 180.0, a],
+        };
+        if cache.len() > 400 {
+            cache.clear();
+        }
+        if !masks_for(&board, &mut cache, &set) {
+            continue;
+        }
+        let chosen: Vec<&Mask> = set.iter().filter_map(|x| cache.iter().find(|m| (m.angle - x).abs() < 1e-9)).collect();
+        if !run(&board, &chosen, ORDERS[rng.below(ORDERS.len())], &mut best, &mut improved, true).0 {
+            return finish(search);
+        }
+    }
+}
+
+fn finish(search: &Search) {
+    search.done.store(true, Ordering::Relaxed);
+}
+
+/// A small random number generator (xorshift), enough for picking tries.
+struct Rng(u64);
+
+impl Rng {
+    fn new() -> Self {
+        let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
+        Rng(seed | 1)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % n.max(1) as u64) as usize
+    }
 }
 
 #[cfg(test)]
@@ -371,6 +607,10 @@ mod tests {
 
     fn settings(spacing: f64, rotate: bool) -> Settings {
         Settings { spacing, rotate, max: None }
+    }
+
+    fn problem(container: &[Vec<Pt>], obstacles: &[Vec<Pt>], piece: &[Vec<Pt>], centre: Pt, settings: &Settings) -> Problem {
+        Problem { container: container.to_vec(), obstacles: obstacles.to_vec(), piece: piece.to_vec(), centre, settings: settings.clone() }
     }
 
     fn placed(piece: &[Vec<Pt>], centre: Pt, p: &Placement) -> Vec<Vec<Pt>> {
@@ -399,7 +639,7 @@ mod tests {
     #[test]
     fn squares_fill_a_rectangle_exactly() {
         let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
-        let out = fill(&[rect(0.0, 0.0, 100.0, 50.0)], &[], &sq, (5.0, 5.0), &settings(0.0, false));
+        let out = fill(&problem(&[rect(0.0, 0.0, 100.0, 50.0)], &[], &sq, (5.0, 5.0), &settings(0.0, false)));
         assert_eq!(out.len(), 50);
     }
 
@@ -407,7 +647,7 @@ mod tests {
     fn spacing_keeps_pieces_and_edges_apart() {
         let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
         let container = rect(0.0, 0.0, 100.0, 50.0);
-        let out = fill(std::slice::from_ref(&container), &[], &sq, (5.0, 5.0), &settings(2.0, false));
+        let out = fill(&problem(std::slice::from_ref(&container), &[], &sq, (5.0, 5.0), &settings(2.0, false)));
         // 8 × 4: 2 mm from the edge and between squares.
         assert_eq!(out.len(), 32);
         let shapes: Vec<Vec<Pt>> = out.iter().map(|p| placed(&sq, (5.0, 5.0), p)[0].clone()).collect();
@@ -423,8 +663,8 @@ mod tests {
     fn turning_lets_a_piece_fit() {
         // 30 × 10 into 12 × 32: only upright.
         let bar = vec![rect(0.0, 0.0, 30.0, 10.0)];
-        assert!(fill(&[rect(0.0, 0.0, 12.0, 32.0)], &[], &bar, (15.0, 5.0), &settings(0.0, false)).is_empty());
-        let out = fill(&[rect(0.0, 0.0, 12.0, 32.0)], &[], &bar, (15.0, 5.0), &settings(0.0, true));
+        assert!(fill(&problem(&[rect(0.0, 0.0, 12.0, 32.0)], &[], &bar, (15.0, 5.0), &settings(0.0, false))).is_empty());
+        let out = fill(&problem(&[rect(0.0, 0.0, 12.0, 32.0)], &[], &bar, (15.0, 5.0), &settings(0.0, true)));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].angle.rem_euclid(180.0), 90.0);
     }
@@ -434,8 +674,8 @@ mod tests {
         let s = vec![star(0.0, 0.0, 20.0)];
         let board = rect(0.0, 0.0, 200.0, 120.0);
         let spacing = 1.0;
-        let upright = fill(std::slice::from_ref(&board), &[], &s, (0.0, 0.0), &settings(spacing, false));
-        let turned = fill(std::slice::from_ref(&board), &[], &s, (0.0, 0.0), &settings(spacing, true));
+        let upright = fill(&problem(std::slice::from_ref(&board), &[], &s, (0.0, 0.0), &settings(spacing, false)));
+        let turned = fill(&problem(std::slice::from_ref(&board), &[], &s, (0.0, 0.0), &settings(spacing, true)));
         assert!(upright.len() >= 12, "{}", upright.len());
         assert!(turned.len() > upright.len(), "turning fits more stars: {} vs {}", turned.len(), upright.len());
         let shapes: Vec<Vec<Pt>> = turned.iter().map(|p| placed(&s, (0.0, 0.0), p)[0].clone()).collect();
@@ -452,8 +692,8 @@ mod tests {
         // An L 20 × 20 with 10 mm legs: half of its box is empty, so pairs turned 180° fill it.
         let l = vec![vec![(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (10.0, 10.0), (10.0, 20.0), (0.0, 20.0), (0.0, 0.0)]];
         let board = [rect(0.0, 0.0, 120.0, 80.0)];
-        let upright = fill(&board, &[], &l, (10.0, 10.0), &settings(0.0, false)).len();
-        let turned = fill(&board, &[], &l, (10.0, 10.0), &settings(0.0, true)).len();
+        let upright = fill(&problem(&board, &[], &l, (10.0, 10.0), &settings(0.0, false))).len();
+        let turned = fill(&problem(&board, &[], &l, (10.0, 10.0), &settings(0.0, true))).len();
         assert_eq!(upright, 24, "one per 20 × 20 box");
         // 120 × 80 holds 9600 mm², an L 300 mm²: 32 is every bit of the board.
         assert_eq!(turned, 32, "pairs turned 180° fill the board completely");
@@ -465,9 +705,44 @@ mod tests {
         let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
         let mut s = settings(0.0, true);
         s.max = Some(3);
-        let out = fill(&[rect(0.0, 0.0, 100.0, 50.0)], &[], &sq, (5.0, 5.0), &s);
+        let out = fill(&problem(&[rect(0.0, 0.0, 100.0, 50.0)], &[], &sq, (5.0, 5.0), &s));
         assert_eq!(out.len(), 3);
         assert!(out.iter().all(|p| p.offset.1.abs() < 1e-6), "all in the first row: {out:?}");
+    }
+
+    #[test]
+    fn searching_longer_never_does_worse_and_stays_valid() {
+        let s = vec![star(0.0, 0.0, 20.0)];
+        let board = rect(0.0, 0.0, 200.0, 120.0);
+        let spacing = 1.0;
+        let p = problem(std::slice::from_ref(&board), &[], &s, (0.0, 0.0), &settings(spacing, true));
+        let quick = fill(&p).len();
+        let search = Search::default();
+        let started = Instant::now();
+        super::search(&p, &search, Duration::from_secs(4), Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(6), "keeps to its time");
+        assert!(search.done.load(Ordering::Relaxed));
+        let best = search.best();
+        assert!(best.len() >= quick, "{} vs {quick}", best.len());
+        let shapes: Vec<Vec<Pt>> = best.iter().map(|q| placed(&s, (0.0, 0.0), q)[0].clone()).collect();
+        for (i, a) in shapes.iter().enumerate() {
+            assert!(a.iter().all(|&(x, y)| x >= spacing - 1e-6 && y >= spacing - 1e-6 && x <= 200.0 - spacing + 1e-6 && y <= 120.0 - spacing + 1e-6));
+            for b in &shapes[i + 1..] {
+                assert!(distance(a, b) >= spacing - 1e-6, "{}", distance(a, b));
+            }
+        }
+    }
+
+    #[test]
+    fn a_search_stops_when_told() {
+        let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
+        let p = problem(&[rect(0.0, 0.0, 300.0, 200.0)], &[], &sq, (5.0, 5.0), &settings(1.0, true));
+        let search = Search::default();
+        search.stop.store(true, Ordering::Relaxed);
+        let started = Instant::now();
+        super::search(&p, &search, Duration::from_secs(30), Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(search.done.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -475,9 +750,9 @@ mod tests {
         let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
         // A 50 × 50 board with a 30 × 30 hole in the middle: only the 10 mm frame is left.
         let board = vec![rect(0.0, 0.0, 50.0, 50.0), rect(10.0, 10.0, 30.0, 30.0)];
-        assert_eq!(fill(&board, &[], &sq, (5.0, 5.0), &settings(0.0, false)).len(), 16);
+        assert_eq!(fill(&problem(&board, &[], &sq, (5.0, 5.0), &settings(0.0, false))).len(), 16);
         // Something lying in the top-left corner.
-        let out = fill(&[rect(0.0, 0.0, 30.0, 10.0)], &[rect(0.0, 0.0, 10.0, 10.0)], &sq, (5.0, 5.0), &settings(0.0, false));
+        let out = fill(&problem(&[rect(0.0, 0.0, 30.0, 10.0)], &[rect(0.0, 0.0, 10.0, 10.0)], &sq, (5.0, 5.0), &settings(0.0, false)));
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|p| p.offset.0 >= 10.0 - 1e-9));
     }
@@ -487,7 +762,7 @@ mod tests {
         let sq = vec![rect(0.0, 0.0, 10.0, 10.0)];
         let mut s = settings(0.0, false);
         s.max = Some(3);
-        assert_eq!(fill(&[rect(0.0, 0.0, 100.0, 50.0)], &[], &sq, (5.0, 5.0), &s).len(), 3);
-        assert!(fill(&[rect(0.0, 0.0, 9.0, 9.0)], &[], &sq, (5.0, 5.0), &settings(0.0, false)).is_empty());
+        assert_eq!(fill(&problem(&[rect(0.0, 0.0, 100.0, 50.0)], &[], &sq, (5.0, 5.0), &s)).len(), 3);
+        assert!(fill(&problem(&[rect(0.0, 0.0, 9.0, 9.0)], &[], &sq, (5.0, 5.0), &settings(0.0, false))).is_empty());
     }
 }

@@ -30,6 +30,20 @@ use crate::widgets::{self, Btn};
 
 const DEFAULT_BED: (f64, f64) = (1000.0, 600.0);
 const PORT_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+/// Longest search for a fill, and how long it may go without finding more.
+const FILL_TIME: Duration = Duration::from_secs(30);
+const FILL_PLATEAU: Duration = Duration::from_secs(10);
+
+/// A fill being searched for.
+struct FillRun {
+    search: std::sync::Arc<nest::Search>,
+    dialog: FillDialog,
+    shape: String,
+    started: Instant,
+    /// Done was pressed: take the result as soon as the search has stopped.
+    accept: bool,
+}
+
 /// The fill dialog's state: what fills what, and how.
 struct FillDialog {
     container: usize,
@@ -138,6 +152,8 @@ pub struct FokusApp {
     test_grid: Option<testgrid::Spec>,
     /// The fill dialog, while open.
     fill: Option<FillDialog>,
+    /// A fill being searched for, while it runs.
+    fill_run: Option<FillRun>,
     checklist: [bool; CHECKLIST],
     /// Result of the last save: (ok, message).
     save_msg: Option<(bool, String)>,
@@ -197,6 +213,7 @@ impl FokusApp {
             prepare_open: false,
             test_grid: None,
             fill: None,
+            fill_run: None,
             checklist: [false; CHECKLIST],
             save_msg: None,
             project_path: None,
@@ -618,19 +635,87 @@ impl FokusApp {
         let escape = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         if run {
             let settings = nest::Settings { spacing: f.spacing, rotate: f.rotate, max: f.limited.then_some(f.max as usize) };
-            self.history.checkpoint(&self.design);
-            let new = self.design.fill_with(f.container, &f.template, &settings);
-            if new.is_empty() {
-                f.error = Some(t!("fill-none"));
-                self.fill = Some(f);
-            } else {
-                logln!("Filled {shape} with {} copies", new.len());
-                self.selection = new;
-                self.canvas.menu_target = None;
+            match self.design.fill_problem(f.container, &f.template, &settings) {
+                Some(problem) => {
+                    // The search runs on a thread of its own; the dialog below shows how it goes.
+                    let search = std::sync::Arc::new(nest::Search::default());
+                    let (s, repaint) = (search.clone(), ctx.clone());
+                    std::thread::spawn(move || {
+                        nest::search(&problem, &s, FILL_TIME, FILL_PLATEAU);
+                        repaint.request_repaint();
+                    });
+                    self.fill_run = Some(FillRun { search, dialog: f, shape, started: Instant::now(), accept: false });
+                }
+                None => {
+                    f.error = Some(t!("fill-none"));
+                    self.fill = Some(f);
+                }
             }
         } else if !cancel && !escape {
             self.fill = Some(f);
         }
+    }
+
+    /// While a fill is searched for: the canvas dimmed, a spinner, the best
+    /// count so far, and Done (take it now) or Cancel.
+    fn fill_run_modal(&mut self, ctx: &egui::Context) {
+        let Some(run) = self.fill_run.as_mut() else { return };
+        let pal = theme::p();
+        let done = run.search.done.load(std::sync::atomic::Ordering::Relaxed);
+        if !done {
+            let (count, secs) = (run.search.count(), run.started.elapsed().as_secs());
+            let (mut finish, mut cancel) = (false, false);
+            egui::Modal::new(egui::Id::unique("fill-run")).frame(modal_frame()).show(ctx, |ui| {
+                ui.set_width(340.0);
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(22.0).color(pal.accent));
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(t!("fill-searching")).size(16.0).semibold());
+                        ui.label(RichText::new(t!("fill-progress", count = count.to_string(), seconds = secs.to_string(), total = FILL_TIME.as_secs().to_string())).color(pal.muted));
+                    });
+                });
+                ui.add_space(6.0);
+                ui.add(egui::ProgressBar::new((run.started.elapsed().as_secs_f32() / FILL_TIME.as_secs_f32()).min(1.0)).desired_height(4.0));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if Btn::new(t!("cancel")).show(ui).clicked() {
+                        cancel = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add_enabled_ui(count > 0, |ui| Btn::new(t!("fill-done")).icon(Icon::Check).primary().show(ui)).inner.clicked() {
+                            finish = true;
+                        }
+                    });
+                });
+            });
+            if cancel || ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                run.search.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.fill_run = None;
+                return;
+            }
+            if finish {
+                run.search.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                run.accept = true;
+            }
+            ctx.request_repaint_after(Duration::from_millis(150));
+            if !run.accept {
+                return;
+            }
+        }
+        // Done searching (or told to stop): take the best it found.
+        let Some(run) = self.fill_run.take() else { return };
+        let placements = run.search.best();
+        let f = run.dialog;
+        if placements.is_empty() {
+            self.fill = Some(FillDialog { error: Some(t!("fill-none")), ..f });
+            return;
+        }
+        self.history.checkpoint(&self.design);
+        let new = self.design.apply_fill(f.container, &f.template, &placements);
+        logln!("Filled {} with {} copies after {:.0} s", run.shape, new.len(), run.started.elapsed().as_secs_f64());
+        self.selection = new;
+        self.canvas.menu_target = None;
     }
 
     /// Closing while the laser works: stop the job first, or stay.
@@ -945,7 +1030,7 @@ impl FokusApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.prepare_open || self.test_grid.is_some() || self.fill.is_some() {
+        if self.prepare_open || self.test_grid.is_some() || self.fill.is_some() || self.fill_run.is_some() {
             return;
         }
         // While text is typed on the canvas it has the keyboard, but undo
@@ -1176,6 +1261,7 @@ impl eframe::App for FokusApp {
         self.prepare_modal(ui.ctx(), &snap);
         self.test_grid_modal(ui.ctx(), &snap);
         self.fill_modal(ui.ctx());
+        self.fill_run_modal(ui.ctx());
         self.unsaved_modal(ui.ctx());
         self.quit_job_modal(ui.ctx());
 
